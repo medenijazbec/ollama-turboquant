@@ -8,6 +8,49 @@
 
 Start building with open models.
 
+## TurboQuant Fork
+
+This fork adds a paper-style TurboQuant KV-cache path for `tq25` and `tq35`:
+
+- deterministic random orthogonal rotation
+- scalar Lloyd-Max quantization in rotated space
+- key-side product scoring with a 1-bit QJL-style residual sketch
+- value-side MSE quantization without residual correction
+
+The full implementation and benchmark report lives here:
+
+- [TurboQuant paper-path report](docs/turboquant_paper_design.md)
+- [TurboQuant KV audit](docs/turboquant_audit.md)
+- [KV stress benchmark commands](docs/kvstress-test-commands.txt)
+
+### Benchmark Snapshot
+
+Current public short-run benchmark summary:
+
+- TurboQuant `tq35` vs baseline `f16`: **30.2% faster overall** on a weighted roll-up across directly comparable Tests 2-7
+- Conservative equal-weight roll-up: **13.1% better overall**
+- Whole turbo stack including the `turbo f16` runtime regression gate: **36.5% faster overall**
+- Weighted side metrics for `tq35` vs baseline: **+7.9% prefill**, **+117.0% decode**, **+23.4% TTFT**
+
+What the current results show:
+
+- strongest gains appear in heavier long-context and spill-adjacent workloads
+- decode throughput improves much more consistently than TTFT
+- capacity and memory-envelope gains are **not yet proven**
+
+### Public Test Server
+
+The published numbers in the report were produced on:
+
+- 2x NVIDIA Tesla M40 24 GB
+- CUDA driver 12.2
+- about 94 GiB system RAM
+- about 80 GiB swap
+
+These were intentionally short benchmark runs because the available hardware is limited and the M40 platform is older and passively cooled.
+
+If you want to validate or challenge these numbers, please run the benchmark suite on your own hardware and publish the results. External reproduction is welcome.
+
 ## Download
 
 ### macOS
