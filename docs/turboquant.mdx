@@ -1,0 +1,169 @@
+---
+title: TurboQuant
+---
+
+TurboQuant is Ollama's compressed KV-cache path for the new engine. It reduces KV memory growth during long-context generation without changing the model's GGUF weight quantization.
+
+In this branch, `tq25` and `tq35` now resolve to the paper-faithful TurboQuant path by default:
+
+- deterministic random orthogonal rotation
+- scalar Lloyd-Max quantization in the rotated basis
+- key-side 1-bit QJL residual correction for inner-product scoring
+- value-side MSE quantization only
+
+TurboQuant is KV-cache compression only.
+
+## What Is Implemented
+
+This branch includes:
+
+- paper-faithful TurboQuant codec in `turboquant/`
+- cache integration in `kvcache/turboquant.go`
+- CPU compressed-K attention scoring in `ml/backend/ggml/ggml.go`
+- runtime metadata for:
+  - `kv_mode_requested`
+  - `kv_mode_resolved`
+  - `kv_algo_resolved`
+  - `kv_cache_path`
+
+## Where It Lives
+
+- `turboquant/`: codec, packing, decode, scoring helpers
+- `kvcache/turboquant.go`: KV cache storage, fallback decode, compressed-K handoff
+- `runner/ollamarunner/cache.go`: TurboQuant cache selection for `tq25` and `tq35`
+- `llm/server.go`: KV mode resolution, normalization, and request/env precedence
+- `ml/backend/ggml/ggml.go`: CPU fast path and fallback selection
+- `docs/turboquant_paper_design.md`: paper-fidelity note and scope boundaries
+
+## How To Use It
+
+### One run
+
+Use the recommended mode:
+
+```shell
+ollama run gemma3 --turboquant
+```
+
+Choose a specific TurboQuant preset:
+
+```shell
+ollama run gemma3 --turboquant=tq35
+ollama run gemma3 --turboquant=tq25
+```
+
+Disable it explicitly for one run:
+
+```shell
+ollama run gemma3 --turboquant=off
+```
+
+### API
+
+Set `options.kv_cache_type` on `/api/generate` or `/api/chat`:
+
+```json
+{
+  "model": "gemma3",
+  "prompt": "Explain TurboQuant.",
+  "options": {
+    "kv_cache_type": "tq35"
+  }
+}
+```
+
+The runtime reports the resolved mode and algorithm in the final response metrics:
+
+- `resolved_kv_cache_type`
+- `kv_algo_resolved`
+- `kv_cache_path`
+
+### Modelfile default
+
+To make a selected model default to TurboQuant:
+
+```text
+FROM gemma3
+PARAMETER kv_cache_type tq35
+```
+
+More aggressive compression:
+
+```text
+PARAMETER kv_cache_type tq25
+```
+
+Inspect the stored default with:
+
+```shell
+ollama show --parameters your-model
+```
+
+### Environment fallback
+
+If neither the request nor the model specifies a KV mode, Ollama falls back to `OLLAMA_KV_CACHE_TYPE`.
+
+## Mode Precedence
+
+The effective KV cache mode is resolved in this order:
+
+1. request override: `--turboquant` or `options.kv_cache_type`
+2. model default: `PARAMETER kv_cache_type ...`
+3. environment: `OLLAMA_KV_CACHE_TYPE`
+4. implicit default: `f16`
+
+## Compatibility And Limitations
+
+- TurboQuant applies to generation and chat paths only.
+- The legacy llama runner still rejects TurboQuant modes.
+- TurboQuant modes require the new engine path.
+- Quantized KV modes require flash attention support.
+- The current fast path is CPU first.
+- Unsupported configurations fall back to the dense KV path.
+- PolarQuant is deferred and not exposed as a public request-time selector in this phase.
+
+## TurboQuant And GGUF Quants
+
+TurboQuant is KV-cache compression. It does not replace the model's GGUF weight quantization.
+
+That means you can use TurboQuant on top of the GGUF model-weight formats that Ollama already loads successfully through the new engine, for example:
+
+- `F16`
+- `Q8_0`
+- `Q6_K`
+- `Q5_K_M`
+- `Q5_K_S`
+- `Q4_K_M`
+- `Q4_K_S`
+
+This is not a separate closed compatibility matrix. TurboQuant overlays the normal GGUF model-weight format you already use.
+
+## Benchmarks
+
+Use the benchmark tools in:
+
+- `scripts/benchmark_turboquant_plan5.ps1`
+- `scripts/benchmark_turboquant.ps1`
+- `cmd/bench`
+
+Recommended comparison set:
+
+- baseline: `f16`, `q8_0`, `q4_0`
+- TurboQuant: `tq35`, `tq25`
+
+Suggested metrics:
+
+- peak KV memory
+- total process memory
+- first-token latency
+- steady-state tokens/sec
+- mean absolute logit error vs dense reference
+- output drift summary
+
+### Results Template
+
+| Mode | Weight Quant | KV Memory | Total Memory | TTFT | Tok/s | Logit Error | Path |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| f16 | Q4_K_M |  |  |  |  |  | dense-fallback |
+| tq35 | Q4_K_M |  |  |  |  |  | turboquant-cpu-fastpath |
+| tq25 | Q4_K_M |  |  |  |  |  | turboquant-cpu-fastpath |

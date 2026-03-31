@@ -448,6 +448,7 @@ func loadOrUnloadModel(cmd *cobra.Command, opts *runOptions) error {
 	req := &api.GenerateRequest{
 		Model:     opts.Model,
 		KeepAlive: opts.KeepAlive,
+		Options:   opts.Options,
 
 		// pass Think here so we fail before getting to the chat prompt if the model doesn't support it
 		Think: opts.Think,
@@ -568,6 +569,23 @@ func hasListedModelName(models []api.ListModelResponse, name string) bool {
 	return false
 }
 
+func normalizeTurboQuantFlagValue(flagName, value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "", nil
+	case "off":
+		return "f16", nil
+	case "tq25", "tq35", "tq3", "tq4":
+		return strings.ToLower(strings.TrimSpace(value)), nil
+	default:
+		return "", fmt.Errorf("invalid value for %s: %q (must be tq25, tq35, tq3, tq4, or off)", flagName, value)
+	}
+}
+
+func normalizeTurboQuantFlag(value string) (string, error) {
+	return normalizeTurboQuantFlagValue("--turboquant", value)
+}
+
 func RunHandler(cmd *cobra.Command, args []string) error {
 	interactive := true
 
@@ -622,6 +640,29 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		opts.KeepAlive = &api.Duration{Duration: d}
+	}
+
+	var requestedKVCacheType string
+	var requestedKVCacheBackend string
+	turboquantFlag := cmd.Flags().Lookup("turboquant")
+	turboquantCUDAFlag := cmd.Flags().Lookup("turboquant-cuda")
+	if turboquantFlag != nil && turboquantCUDAFlag != nil && turboquantFlag.Changed && turboquantCUDAFlag.Changed {
+		return errors.New("only one of --turboquant or --turboquant-cuda may be specified")
+	}
+	if turboquantFlag != nil && turboquantFlag.Changed {
+		requestedKVCacheType, err = normalizeTurboQuantFlagValue("--turboquant", turboquantFlag.Value.String())
+		if err != nil {
+			return err
+		}
+	}
+	if turboquantCUDAFlag != nil && turboquantCUDAFlag.Changed {
+		requestedKVCacheType, err = normalizeTurboQuantFlagValue("--turboquant-cuda", turboquantCUDAFlag.Value.String())
+		if err != nil {
+			return err
+		}
+		if requestedKVCacheType != "" && requestedKVCacheType != "f16" {
+			requestedKVCacheBackend = "cuda"
+		}
 	}
 
 	prompts := args[1:]
@@ -717,6 +758,11 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 
 	// If it's an embedding model, handle embedding generation
 	if isEmbeddingModel {
+		if turboquantCUDAFlag != nil && turboquantCUDAFlag.Changed {
+			fmt.Fprintf(os.Stderr, "warning: --turboquant-cuda is ignored for embedding models\n")
+		} else if requestedKVCacheType != "" {
+			fmt.Fprintf(os.Stderr, "warning: --turboquant is ignored for embedding models\n")
+		}
 		if opts.Prompt == "" {
 			return errors.New("embedding models require input text. Usage: ollama run " + name + " \"your text here\"")
 		}
@@ -737,10 +783,22 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 
 	// Check if this is an image generation model
 	if slices.Contains(info.Capabilities, model.CapabilityImage) {
+		if turboquantCUDAFlag != nil && turboquantCUDAFlag.Changed {
+			fmt.Fprintf(os.Stderr, "warning: --turboquant-cuda is ignored for image generation models\n")
+		} else if requestedKVCacheType != "" {
+			fmt.Fprintf(os.Stderr, "warning: --turboquant is ignored for image generation models\n")
+		}
 		if opts.Prompt == "" && !interactive {
 			return errors.New("image generation models require a prompt. Usage: ollama run " + name + " \"your prompt here\"")
 		}
 		return imagegen.RunCLI(cmd, name, opts.Prompt, interactive, opts.KeepAlive)
+	}
+
+	if requestedKVCacheType != "" {
+		opts.Options["kv_cache_type"] = requestedKVCacheType
+	}
+	if requestedKVCacheBackend != "" {
+		opts.Options["kv_cache_backend"] = requestedKVCacheBackend
 	}
 
 	// Check for experimental flag
@@ -2151,6 +2209,10 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Bool("insecure", false, "Use an insecure registry")
 	runCmd.Flags().Bool("nowordwrap", false, "Don't wrap words to the next line automatically")
 	runCmd.Flags().String("format", "", "Response format (e.g. json)")
+	runCmd.Flags().String("turboquant", "", "Enable TurboQuant KV cache for this run (tq35, tq25, tq3, tq4, off)")
+	runCmd.Flags().Lookup("turboquant").NoOptDefVal = "tq35"
+	runCmd.Flags().String("turboquant-cuda", "", "Request CUDA TurboQuant KV cache for this run (tq35, tq25, tq3, tq4, off)")
+	runCmd.Flags().Lookup("turboquant-cuda").NoOptDefVal = "tq35"
 	runCmd.Flags().String("think", "", "Enable thinking mode: true/false or high/medium/low for supported models")
 	runCmd.Flags().Lookup("think").NoOptDefVal = "true"
 	runCmd.Flags().Bool("hidethinking", false, "Hide thinking output (if provided)")

@@ -13,6 +13,7 @@ A Go-based command-line tool for benchmarking Ollama models with configurable pa
  * Model metadata display (parameter size, quantization level, family)
  * VRAM and CPU memory usage tracking via running process info
  * Controlled prompt token length for reproducible benchmarks
+ * TurboQuant KV-cache mode selection for with/without comparisons
  * Benchstat and CSV output formats
 
 ## Building from Source
@@ -61,6 +62,14 @@ benchstat -col /name gemma.bench
 ./ollama-bench -model llama3 -epochs 10 -temperature 0.7 -max-tokens 500 -seed 42 -warmup 2 -format csv -output results.csv
 ```
 
+### With TurboQuant
+
+```
+./ollama-bench -model gemma3 -epochs 6 -turboquant=tq35
+./ollama-bench -model gemma3 -epochs 6 -turboquant=tq25
+./ollama-bench -model gemma3 -epochs 6 -turboquant=off
+```
+
 ## Command Line Options
 
 | Option  	| Description | Default |
@@ -78,6 +87,7 @@ benchstat -col /name gemma.bench
 | -output	| Output file for results			| "" (stdout)		|
 | -warmup	| Number of warmup requests before timing	| 1			|
 | -prompt-tokens	| Generate prompt targeting ~N tokens (0 = use -p)	| 0		|
+| -turboquant	| KV cache mode override: tq35, tq25, tq3, tq4, off	| ""		|
 | -v		| Verbose mode					| false			|
 | -debug	| Show debug information			| false			|
 
@@ -88,7 +98,7 @@ benchstat -col /name gemma.bench
 Compatible with Go's benchstat tool for statistical analysis. Uses one value/unit pair per line, standard `ns/op` for timing metrics, and `ns/token` for throughput. Each epoch produces one set of lines -- benchstat aggregates across repeated runs to compute statistics.
 
 ```
-# Model: gemma3 | Params: 4.3B | Quant: Q4_K_M | Family: gemma3 | Size: 4080218931 | VRAM: 4080218931
+# Model: gemma3 | Params: 4.3B | Quant: Q4_K_M | Family: gemma3 | KV: tq35 | Path: turboquant-cpu-fastpath | Size: 4080218931 | VRAM: 4080218931
 BenchmarkModel/name=gemma3/step=prefill 1 78125.00 ns/token 12800.00 token/sec
 BenchmarkModel/name=gemma3/step=generate 1 19531.25 ns/token 51200.00 token/sec
 BenchmarkModel/name=gemma3/step=ttft 1 45123000 ns/op
@@ -116,7 +126,7 @@ Machine-readable comma-separated values:
 
 ```
 NAME,STEP,COUNT,NS_PER_COUNT,TOKEN_PER_SEC
-# Model: gemma3 | Params: 4.3B | Quant: Q4_K_M | Family: gemma3 | Size: 4080218931 | VRAM: 4080218931
+# Model: gemma3 | Params: 4.3B | Quant: Q4_K_M | Family: gemma3 | KV: tq35 | Path: turboquant-cpu-fastpath | Size: 4080218931 | VRAM: 4080218931
 gemma3,prefill,128,78125.00,12800.00
 gemma3,generate,512,19531.25,51200.00
 gemma3,ttft,1,45123000,0
@@ -138,6 +148,8 @@ Additionally, the model info comment line (displayed once per model before epoch
 
  * **Params**: Model parameter count (e.g., 4.3B)
  * **Quant**: Quantization level (e.g., Q4_K_M)
+ * **KV**: Requested KV cache mode for the benchmark run
+ * **Path**: Expected runtime path label for the configuration
  * **Family**: Model family (e.g., gemma3)
  * **Size**: Total model memory in bytes
  * **VRAM**: GPU memory used by the loaded model (when Size > VRAM, the difference is CPU spill)

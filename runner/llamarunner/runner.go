@@ -843,7 +843,10 @@ func (s *Server) loadModel(
 		panic(err)
 	}
 
-	ctxParams := llama.NewContextParams(kvSize, s.batchSize, s.parallel, threads, flashAttention, kvCacheType)
+	ctxParams, err := llama.NewContextParams(kvSize, s.batchSize, s.parallel, threads, flashAttention, kvCacheType)
+	if err != nil {
+		panic(err)
+	}
 	s.lc, err = llama.NewContextWithModel(s.model, ctxParams)
 	if err != nil {
 		panic(err)

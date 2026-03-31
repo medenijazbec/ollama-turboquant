@@ -1,0 +1,27 @@
+2. Same-runtime paper TurboQuant proof
+
+Tests:
+- baseline and turbo hosts
+- baseline runs f16 and marks unsupported tq rows explicitly
+- turbo f16 vs turbo tq25 vs turbo tq35
+- same-runtime causal speed and live-KV benefit comes from turbo rows
+- headline speed rows are full-GPU only
+- prefill-heavy only
+- extra-lite matrix for about 15 to 30 minutes on 2x Tesla M40
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --host-kv-support legacy,request \
+  --profile quick \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --kv-modes f16,tq25,tq35 \
+  --workloads prefill-heavy \
+  --num-ctx 16384 \
+  --concurrency 1 \
+  --warmup 0 \
+  --epochs 1 \
+  --timeout 0 \
+  --output /results_full/2_same_runtime_paper_turboquant_proof/turbo_benefit_paper.csv \
+  --jsonl-output /results_full/2_same_runtime_paper_turboquant_proof/turbo_benefit_paper.jsonl \
+  --summary-output /results_full/2_same_runtime_paper_turboquant_proof/turbo_benefit_paper.txt

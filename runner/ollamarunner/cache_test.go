@@ -1,13 +1,20 @@
 package ollamarunner
 
 import (
+	"context"
 	"errors"
+	"iter"
 	"fmt"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/ollama/ollama/fs"
+	"github.com/ollama/ollama/kvcache"
 	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/model"
 	"github.com/ollama/ollama/model/input"
 )
 
@@ -69,6 +76,27 @@ func TestCountCommon(t *testing.T) {
 				t.Errorf("countCommonPrefix(%v, %v): have %v; want %v", tt.t1, tt.t2, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestKVCacheTypeFromStrTurboQuant(t *testing.T) {
+	tests := map[string]ml.DType{
+		"":     ml.DTypeF16,
+		"f16":  ml.DTypeF16,
+		"q8_0": ml.DTypeQ80,
+		"q4_0": ml.DTypeQ40,
+		"tq25": ml.DTypeTQ25,
+		"tq35": ml.DTypeTQ35,
+		"tq3":  ml.DTypeTQ35,
+		"tq4":  ml.DTypeTQ35,
+		"TQ35": ml.DTypeTQ35,
+		"Tq3":  ml.DTypeTQ35,
+	}
+
+	for in, want := range tests {
+		if got := kvCacheTypeFromStr(in); got != want {
+			t.Fatalf("kvCacheTypeFromStr(%q) = %v, want %v", in, got, want)
+		}
 	}
 }
 
@@ -589,5 +617,185 @@ func TestShiftCacheSlot(t *testing.T) {
 				t.Errorf("Slot inputs length after operation: got %v, want %v", len(slot.Inputs), tt.wantInputsLen)
 			}
 		})
+	}
+}
+
+type runnerTestBackend struct {
+	supportsTurboQuantFastPath bool
+	supportsTurboQuantCUDA     bool
+}
+
+func (b *runnerTestBackend) Close() {}
+
+func (b *runnerTestBackend) Load(ctx context.Context, progress func(float32)) error {
+	return nil
+}
+
+func (b *runnerTestBackend) BackendMemory() ml.BackendMemory {
+	return ml.BackendMemory{}
+}
+
+func (b *runnerTestBackend) Config() fs.Config {
+	return runnerTestConfig{}
+}
+
+func (b *runnerTestBackend) Get(name string) ml.Tensor {
+	return nil
+}
+
+func (b *runnerTestBackend) NewContext() ml.Context {
+	return nil
+}
+
+func (b *runnerTestBackend) NewContextSize(size int) ml.Context {
+	return nil
+}
+
+func (b *runnerTestBackend) BackendDevices() []ml.DeviceInfo {
+	return nil
+}
+
+func (b *runnerTestBackend) CacheConfig() ml.CacheConfig {
+	return ml.CacheConfig{}
+}
+
+func (b *runnerTestBackend) TurboQuantSupport() ml.TurboQuantSupport {
+	return ml.TurboQuantSupport{CPU: b.supportsTurboQuantFastPath, CUDA: b.supportsTurboQuantCUDA}
+}
+
+type runnerTestConfig struct{}
+
+func (runnerTestConfig) Architecture() string              { return "test" }
+func (runnerTestConfig) String(string, ...string) string   { return "" }
+func (runnerTestConfig) Uint(string, ...uint32) uint32     { return 0 }
+func (runnerTestConfig) Float(string, ...float32) float32  { return 0 }
+func (runnerTestConfig) Bool(string, ...bool) bool         { return false }
+func (runnerTestConfig) Strings(string, ...[]string) []string { return nil }
+func (runnerTestConfig) Ints(string, ...[]int32) []int32   { return nil }
+func (runnerTestConfig) Floats(string, ...[]float32) []float32 { return nil }
+func (runnerTestConfig) Bools(string, ...[]bool) []bool    { return nil }
+func (runnerTestConfig) Len() int                          { return 0 }
+func (runnerTestConfig) Keys() iter.Seq[string]            { return func(yield func(string) bool) {} }
+func (runnerTestConfig) Value(string) any                  { return nil }
+
+type runnerTestModel struct {
+	model.Base
+}
+
+func (m *runnerTestModel) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
+	return nil, nil
+}
+
+func newRunnerTestModel(cache kvcache.Cache, backend ml.Backend) model.Model {
+	m := &runnerTestModel{}
+	baseValue := reflect.ValueOf(&m.Base).Elem()
+	setUnexportedField(baseValue.FieldByName("b"), backend)
+	configField := baseValue.FieldByName("config")
+	setUnexportedField(configField.FieldByName("Cache"), cache)
+	return m
+}
+
+func setUnexportedField(field reflect.Value, value any) {
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(value))
+}
+
+func TestNewInputCacheWrapsTurboQuantCausalCaches(t *testing.T) {
+	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "tq35", "", 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := inputCache.cache.(*kvcache.TurboQuantCache); !ok {
+		t.Fatalf("cache type = %T, want *kvcache.TurboQuantCache", inputCache.cache)
+	}
+}
+
+func TestNewInputCachePreservesWrapperNonCausalCaches(t *testing.T) {
+	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
+	model := newRunnerTestModel(
+		kvcache.NewWrapperCache(
+			kvcache.NewEncoderCache(),
+			kvcache.NewCausalCache(nil),
+		),
+		backend,
+	)
+
+	inputCache, err := NewInputCache(model, "tq25", "", 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wrapper, ok := inputCache.cache.(*kvcache.WrapperCache)
+	if !ok {
+		t.Fatalf("cache type = %T, want *kvcache.WrapperCache", inputCache.cache)
+	}
+	if _, ok := wrapper.UnderlyingCache().(*kvcache.EncoderCache); !ok {
+		t.Fatalf("wrapper cache[0] type = %T, want *kvcache.EncoderCache", wrapper.UnderlyingCache())
+	}
+	wrapper.SetLayerType(1)
+	if _, ok := wrapper.UnderlyingCache().(*kvcache.TurboQuantCache); !ok {
+		t.Fatalf("wrapper cache[1] type = %T, want *kvcache.TurboQuantCache", wrapper.UnderlyingCache())
+	}
+}
+
+func TestNewInputCacheLeavesNonTurboQuantModesUnwrapped(t *testing.T) {
+	backend := &runnerTestBackend{}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "q4_0", "", 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := inputCache.cache.(*kvcache.TurboQuantCache); ok {
+		t.Fatalf("cache type = %T, did not expect TurboQuant wrapping", inputCache.cache)
+	}
+	if _, ok := inputCache.cache.(*kvcache.Causal); !ok {
+		t.Fatalf("cache type = %T, want *kvcache.Causal", inputCache.cache)
+	}
+}
+
+func TestNewInputCacheFallsBackToDenseWhenTurboQuantFastPathUnsupported(t *testing.T) {
+	backend := &runnerTestBackend{supportsTurboQuantFastPath: false}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "tq35", "", 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := inputCache.cache.(*kvcache.TurboQuantCache); !ok {
+		t.Fatalf("cache type = %T, want *kvcache.TurboQuantCache", inputCache.cache)
+	}
+	info := inputCache.RuntimeInfo()
+	if info.Algorithm != "paper" {
+		t.Fatalf("runtime algorithm = %q, want paper", info.Algorithm)
+	}
+	if info.Path != "dense-fallback" {
+		t.Fatalf("runtime path = %q, want dense-fallback", info.Path)
+	}
+}
+
+func TestNewInputCacheTracksExplicitCUDARequestWithoutCUDAFastPath(t *testing.T) {
+	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "tq35", "cuda", 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := inputCache.RuntimeInfo()
+	if info.Algorithm != "paper" {
+		t.Fatalf("runtime algorithm = %q, want paper", info.Algorithm)
+	}
+	if info.Backend != "cuda" {
+		t.Fatalf("runtime backend = %q, want cuda", info.Backend)
+	}
+	if info.Path != "dense-fallback" {
+		t.Fatalf("runtime path = %q, want dense-fallback", info.Path)
 	}
 }

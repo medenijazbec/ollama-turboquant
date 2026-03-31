@@ -899,6 +899,18 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .type_size                = 0,
         .is_quantized             = false,
     },
+    [GGML_TYPE_OLLAMA_TQ25_KV] = {
+        .type_name                = "ollama_tq25_kv",
+        .blck_size                = 1,
+        .type_size                = sizeof(uint8_t),
+        .is_quantized             = false,
+    },
+    [GGML_TYPE_OLLAMA_TQ35_KV] = {
+        .type_name                = "ollama_tq35_kv",
+        .blck_size                = 1,
+        .type_size                = sizeof(uint8_t),
+        .is_quantized             = false,
+    },
 };
 
 const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {

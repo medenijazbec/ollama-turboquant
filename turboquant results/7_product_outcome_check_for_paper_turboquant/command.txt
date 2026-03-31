@@ -1,0 +1,24 @@
+7. Product-outcome check for paper TurboQuant
+
+Tests:
+- baseline and turbo hosts
+- run only if baseline GPU validation passed
+- stock f16 vs turbo tq35
+- end-user outcome comparison
+- slightly heavier single-cell comparison for about 10 to 20 minutes on 2x Tesla M40
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --host-kv-support legacy,request \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --kv-modes f16,tq35 \
+  --workloads prefill-heavy \
+  --num-ctx 32768 \
+  --concurrency 1 \
+  --warmup 0 \
+  --epochs 1 \
+  --timeout 0 \
+  --output /results_full/7_product_outcome_check_for_paper_turboquant/product_outcome_paper.csv \
+  --jsonl-output /results_full/7_product_outcome_check_for_paper_turboquant/product_outcome_paper.jsonl \
+  --summary-output /results_full/7_product_outcome_check_for_paper_turboquant/product_outcome_paper.txt

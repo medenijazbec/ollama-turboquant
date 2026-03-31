@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/ollama/ollama/kvcache"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model"
 	"github.com/ollama/ollama/model/input"
+	"github.com/ollama/ollama/turboquant"
 )
 
 type InputCache struct {
@@ -29,9 +31,15 @@ type InputCache struct {
 	multiUserCache bool
 
 	cache kvcache.Cache
+
+	kvCacheRequested string
+	kvCacheEffective string
+	kvAlgoResolved   string
+	kvCacheBackend   string
+	kvCachePath      string
 }
 
-func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
+func NewInputCache(model model.Model, kvCacheType, kvCacheBackend string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
 	numCtx := kvSize / int32(numSlots)
 
 	if int(numCtx) < batchSize {
@@ -45,8 +53,24 @@ func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots
 	}
 
 	cache := model.Config().Cache
+	normalizedKVCacheType := normalizeKVCacheType(kvCacheType)
+	normalizedKVCacheBackend := normalizeKVCacheBackend(kvCacheBackend)
+	kvCachePath := "dense-fallback"
+	kvCacheEffective := normalizedKVCacheType
+	kvAlgoResolved := ""
 	if cache != nil {
-		cache.Init(model.Backend(), kvCacheTypeFromStr(kvCacheType), numSlots, int(numCtx), batchSize)
+		dtype := kvCacheTypeFromStr(kvCacheType)
+		if preset, ok := kvcachePreset(dtype); ok {
+			cache = kvcache.WrapWithTurboQuant(cache, preset, normalizedKVCacheBackend)
+			kvCachePath = resolveKVCachePath(model.Backend(), dtype, normalizedKVCacheBackend)
+			kvAlgoResolved = turboquant.AlgorithmPaper
+			slog.Info("using turboquant kv cache", "requested", kvCacheType, "backend", normalizedKVCacheBackend, "preset", preset.Name, "path", kvCachePath)
+			if kvCachePath == "dense-fallback" {
+				slog.Warn("turboquant kv cache requested but backend cannot use requested fast path; falling back to dense attention path",
+					"requested", normalizedKVCacheType, "backend", normalizedKVCacheBackend, "path", kvCachePath)
+			}
+		}
+		cache.Init(model.Backend(), dtype, numSlots, int(numCtx), batchSize)
 	}
 
 	return &InputCache{
@@ -55,17 +79,104 @@ func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots
 		slots:          slots,
 		multiUserCache: multiUserCache,
 		cache:          cache,
+		kvCacheRequested: normalizedKVCacheType,
+		kvCacheEffective: kvCacheEffective,
+		kvAlgoResolved:   kvAlgoResolved,
+		kvCacheBackend:   normalizedKVCacheBackend,
+		kvCachePath:      kvCachePath,
 	}, nil
 }
 
+func backendTurboQuantSupport(backend ml.Backend) ml.TurboQuantSupport {
+	tqBackend, ok := backend.(ml.TurboQuantBackend)
+	if !ok {
+		return ml.TurboQuantSupport{}
+	}
+	return tqBackend.TurboQuantSupport()
+}
+
+func normalizeKVCacheBackend(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "cuda":
+		return strings.ToLower(strings.TrimSpace(s))
+	default:
+		return ""
+	}
+}
+
+func resolveKVCachePath(backend ml.Backend, dtype ml.DType, requestedBackend string) string {
+	if _, ok := kvcachePreset(dtype); !ok {
+		return "dense-fallback"
+	}
+
+	support := backendTurboQuantSupport(backend)
+	if requestedBackend == "cuda" {
+		if support.CUDA {
+			return "turboquant-cuda-fastpath"
+		}
+		return "dense-fallback"
+	}
+
+	if support.CPU {
+		return "turboquant-cpu-fastpath"
+	}
+
+	return "dense-fallback"
+}
+
 func kvCacheTypeFromStr(s string) ml.DType {
-	switch s {
+	switch normalizeKVCacheType(s) {
 	case "q8_0":
 		return ml.DTypeQ80
 	case "q4_0":
 		return ml.DTypeQ40
+	case "tq25":
+		return ml.DTypeTQ25
+	case "tq35":
+		return ml.DTypeTQ35
 	default:
 		return ml.DTypeF16
+	}
+}
+
+func normalizeKVCacheType(s string) string {
+	switch strings.ToLower(s) {
+	case "tq3", "tq4":
+		return "tq35"
+	default:
+		return strings.ToLower(s)
+	}
+}
+
+type KVCacheRuntimeInfo struct {
+	Requested string
+	Effective string
+	Algorithm string
+	Backend   string
+	Path      string
+}
+
+func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
+	if c == nil {
+		return KVCacheRuntimeInfo{}
+	}
+	return KVCacheRuntimeInfo{
+		Requested: c.kvCacheRequested,
+		Effective: c.kvCacheEffective,
+		Algorithm: c.kvAlgoResolved,
+		Backend:   c.kvCacheBackend,
+		Path:      c.kvCachePath,
+	}
+}
+
+func kvcachePreset(dtype ml.DType) (turboquant.Preset, bool) {
+	switch dtype {
+	case ml.DTypeTQ25:
+		return turboquant.PresetTQ25, true
+	case ml.DTypeTQ35:
+		return turboquant.PresetTQ35, true
+	default:
+		return turboquant.Preset{}, false
 	}
 }
 

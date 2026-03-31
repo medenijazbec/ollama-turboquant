@@ -32,6 +32,8 @@ type flagOptions struct {
 	verbose      *bool
 	warmup       *int
 	promptTokens *int
+	turboquant   *string
+	turboquantCUDA *string
 }
 
 type Metrics struct {
@@ -48,6 +50,9 @@ type ModelInfo struct {
 	Family            string
 	SizeBytes         int64
 	VRAMBytes         int64
+	KVCacheType       string
+	KVCacheBackend    string
+	ActualPath        string
 }
 
 const DefaultPrompt = `Please write a descriptive story about a llama named Alonso who grows up to be President of the Land of Llamas. Include details about Alonso's childhood, adolescent years, and how he grew up to be a political mover and shaker. Write the story with a sense of whimsy.`
@@ -81,6 +86,45 @@ func generatePromptForTokenCount(targetTokens int, epoch int) string {
 	return strings.Join(words, " ")
 }
 
+func normalizeTurboQuantFlagValue(flagName, value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "", nil
+	case "off":
+		return "f16", nil
+	case "tq25", "tq35", "tq3", "tq4":
+		return strings.ToLower(strings.TrimSpace(value)), nil
+	default:
+		return "", fmt.Errorf("invalid value for %s: %q (must be tq25, tq35, tq3, tq4, or off)", flagName, value)
+	}
+}
+
+func normalizeTurboQuantFlag(value string) (string, error) {
+	return normalizeTurboQuantFlagValue("-turboquant", value)
+}
+
+func expectedTurboQuantPath(kvCacheType string) string {
+	if override := strings.TrimSpace(os.Getenv("OLLAMA_BENCH_EXPECTED_PATH")); override != "" {
+		return override
+	}
+	switch kvCacheType {
+	case "", "f16", "q8_0", "q4_0":
+		return "dense-fallback"
+	default:
+		return "turboquant-cpu-fastpath"
+	}
+}
+
+func expectedTurboQuantPathWithBackend(kvCacheType, kvCacheBackend string) string {
+	if override := strings.TrimSpace(os.Getenv("OLLAMA_BENCH_EXPECTED_PATH")); override != "" {
+		return override
+	}
+	if kvCacheBackend == "cuda" {
+		return "dense-fallback"
+	}
+	return expectedTurboQuantPath(kvCacheType)
+}
+
 func buildGenerateRequest(model string, fOpt flagOptions, imgData api.ImageData, epoch int) *api.GenerateRequest {
 	options := make(map[string]interface{})
 	if *fOpt.maxTokens > 0 {
@@ -89,6 +133,15 @@ func buildGenerateRequest(model string, fOpt flagOptions, imgData api.ImageData,
 	options["temperature"] = *fOpt.temperature
 	if fOpt.seed != nil && *fOpt.seed > 0 {
 		options["seed"] = *fOpt.seed
+	}
+	if fOpt.turboquant != nil && *fOpt.turboquant != "" {
+		options["kv_cache_type"] = *fOpt.turboquant
+	}
+	if fOpt.turboquantCUDA != nil && *fOpt.turboquantCUDA != "" {
+		options["kv_cache_type"] = *fOpt.turboquantCUDA
+		if *fOpt.turboquantCUDA != "f16" {
+			options["kv_cache_backend"] = "cuda"
+		}
 	}
 
 	var keepAliveDuration *api.Duration
@@ -172,13 +225,15 @@ func outputModelInfo(w io.Writer, format string, info ModelInfo) {
 	params := cmp.Or(info.ParameterSize, "unknown")
 	quant := cmp.Or(info.QuantizationLevel, "unknown")
 	family := cmp.Or(info.Family, "unknown")
+	kvMode := cmp.Or(info.KVCacheType, "f16")
+	actualPath := cmp.Or(info.ActualPath, "dense-fallback")
 
 	memStr := ""
 	if info.SizeBytes > 0 {
 		memStr = fmt.Sprintf(" | Size: %d | VRAM: %d", info.SizeBytes, info.VRAMBytes)
 	}
-	fmt.Fprintf(w, "# Model: %s | Params: %s | Quant: %s | Family: %s%s\n",
-		info.Name, params, quant, family, memStr)
+	fmt.Fprintf(w, "# Model: %s | Params: %s | Quant: %s | Family: %s | KV: %s | Path: %s%s\n",
+		info.Name, params, quant, family, kvMode, actualPath, memStr)
 }
 
 func OutputMetrics(w io.Writer, format string, metrics []Metrics, verbose bool) {
@@ -270,13 +325,25 @@ func BenchmarkModel(fOpt flagOptions) error {
 		infoCtx, infoCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		info := fetchModelInfo(infoCtx, client, model)
 		infoCancel()
+		if fOpt.turboquantCUDA != nil && *fOpt.turboquantCUDA != "" {
+			info.KVCacheType = cmp.Or(*fOpt.turboquantCUDA, "f16")
+			info.KVCacheBackend = "cuda"
+			info.ActualPath = expectedTurboQuantPathWithBackend(*fOpt.turboquantCUDA, info.KVCacheBackend)
+		} else if fOpt.turboquant != nil {
+			info.KVCacheType = cmp.Or(*fOpt.turboquant, "f16")
+			info.ActualPath = expectedTurboQuantPathWithBackend(*fOpt.turboquant, info.KVCacheBackend)
+		}
 
 		// Warmup phase (uses negative epoch numbers to avoid colliding with timed epochs)
+		var warmupMetrics *api.Metrics
 		for i := range *fOpt.warmup {
 			req := buildGenerateRequest(model, fOpt, imgData, -(i + 1))
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*fOpt.timeout)*time.Second)
 
 			err = client.Generate(ctx, req, func(resp api.GenerateResponse) error {
+				if resp.Done {
+					warmupMetrics = &resp.Metrics
+				}
 				return nil
 			})
 			cancel()
@@ -292,6 +359,11 @@ func BenchmarkModel(fOpt flagOptions) error {
 		memCtx, memCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		info.SizeBytes, info.VRAMBytes = fetchMemoryUsage(memCtx, client, model)
 		memCancel()
+		if warmupMetrics != nil {
+			info.KVCacheType = cmp.Or(warmupMetrics.KVCacheEffective, info.KVCacheType)
+			info.KVCacheBackend = cmp.Or(warmupMetrics.KVCacheBackend, info.KVCacheBackend)
+			info.ActualPath = cmp.Or(warmupMetrics.KVCachePath, info.ActualPath)
+		}
 
 		outputModelInfo(out, *fOpt.format, info)
 
@@ -479,6 +551,8 @@ func main() {
 		debug:        flag.Bool("debug", false, "Show debug information"),
 		warmup:       flag.Int("warmup", 1, "Number of warmup requests before timing"),
 		promptTokens: flag.Int("prompt-tokens", 0, "Generate prompt targeting ~N tokens (0 = use -p prompt)"),
+		turboquant:   flag.String("turboquant", "", "Enable TurboQuant KV cache for this benchmark (tq35, tq25, tq3, tq4, off)"),
+		turboquantCUDA: flag.String("turboquant-cuda", "", "Request CUDA TurboQuant KV cache for this benchmark (tq35, tq25, tq3, tq4, off)"),
 	}
 
 	flag.Usage = func() {
@@ -492,6 +566,23 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  bench -model gemma3 -epochs 6 -prompt-tokens 512 -format csv\n")
 	}
 	flag.Parse()
+
+	normalizedTurboQuant, err := normalizeTurboQuantFlag(*fOpt.turboquant)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
+	}
+	*fOpt.turboquant = normalizedTurboQuant
+	normalizedTurboQuantCUDA, err := normalizeTurboQuantFlagValue("-turboquant-cuda", *fOpt.turboquantCUDA)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
+	}
+	*fOpt.turboquantCUDA = normalizedTurboQuantCUDA
+	if *fOpt.turboquant != "" && *fOpt.turboquantCUDA != "" {
+		fmt.Fprintln(os.Stderr, "ERROR: only one of -turboquant or -turboquant-cuda may be specified")
+		os.Exit(1)
+	}
 
 	if !slices.Contains([]string{"benchstat", "csv"}, *fOpt.format) {
 		fmt.Fprintf(os.Stderr, "ERROR: Unknown format '%s'\n", *fOpt.format)

@@ -422,7 +422,9 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_4_8 = 37,
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
-        GGML_TYPE_COUNT   = 40,
+        GGML_TYPE_OLLAMA_TQ25_KV = 40,
+        GGML_TYPE_OLLAMA_TQ35_KV = 41,
+        GGML_TYPE_COUNT   = 42,
     };
 
     // precision

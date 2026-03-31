@@ -3,15 +3,17 @@ package ggml
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/ollama/ollama/fs/ggml"
 	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/turboquant"
 )
 
-func setup(tb testing.TB) ml.Context {
+func setupBackend(tb testing.TB, params ml.BackendParams) (ml.Backend, ml.Context) {
 	tb.Helper()
 
 	f, err := os.CreateTemp(tb.TempDir(), "*.bin")
@@ -24,7 +26,9 @@ func setup(tb testing.TB) ml.Context {
 		tb.Fatal(err)
 	}
 
-	b, err := ml.NewBackend(f.Name(), ml.BackendParams{AllocMemory: true})
+	params.AllocMemory = true
+
+	b, err := ml.NewBackend(f.Name(), params)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -37,6 +41,120 @@ func setup(tb testing.TB) ml.Context {
 	})
 
 	return ctx
+}
+
+func setup(tb testing.TB) ml.Context {
+	_, ctx := setupBackend(tb, ml.BackendParams{})
+	return ctx
+}
+
+func TestTurboQuantDTypeRoundTrip(t *testing.T) {
+	ctx := setup(t)
+
+	raw25 := []byte{1, 2, 3, 4}
+	t25 := ctx.FromBytes(ml.DTypeTQ25, raw25, len(raw25))
+	if t25.DType() != ml.DTypeTQ25 {
+		t.Fatalf("t25 dtype = %v, want %v", t25.DType(), ml.DTypeTQ25)
+	}
+	if diff := cmp.Diff(raw25, t25.Bytes()); diff != "" {
+		t.Fatalf("t25 bytes mismatch (-want +got):\n%s", diff)
+	}
+
+	raw35 := []byte{5, 6, 7, 8, 9}
+	t35 := ctx.FromBytes(ml.DTypeTQ35, raw35, len(raw35))
+	if t35.DType() != ml.DTypeTQ35 {
+		t.Fatalf("t35 dtype = %v, want %v", t35.DType(), ml.DTypeTQ35)
+	}
+	if diff := cmp.Diff(raw35, t35.Bytes()); diff != "" {
+		t.Fatalf("t35 bytes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSupportsTurboQuantFastPathRequiresFlashAttention(t *testing.T) {
+	backendNoFlash, ctxNoFlash := setupBackend(t, ml.BackendParams{})
+	_ = ctxNoFlash
+
+	tqBackendNoFlash, ok := backendNoFlash.(ml.TurboQuantBackend)
+	if !ok {
+		t.Fatal("backend does not implement TurboQuantBackend")
+	}
+	if support := tqBackendNoFlash.TurboQuantSupport(); support.CPU || support.CUDA {
+		t.Fatalf("TurboQuantSupport() = %+v without flash attention, want no support", support)
+	}
+
+	backendFlash, ctxFlash := setupBackend(t, ml.BackendParams{FlashAttention: ml.FlashAttentionEnabled})
+	_ = ctxFlash
+
+	tqBackendFlash, ok := backendFlash.(ml.TurboQuantBackend)
+	if !ok {
+		t.Fatal("backend does not implement TurboQuantBackend")
+	}
+	if support := tqBackendFlash.TurboQuantSupport(); !support.CPU || support.CUDA {
+		t.Fatalf("TurboQuantSupport() = %+v with flash attention on CPU-only backend, want CPU only", support)
+	}
+}
+
+func TestTurboQuantScaledDotProductAttentionMatchesDenseReference(t *testing.T) {
+	backend, ctx := setupBackend(t, ml.BackendParams{FlashAttention: ml.FlashAttentionEnabled})
+	_ = backend
+
+	query := ctx.FromFloats([]float32{
+		1, 2,
+		3, 4,
+		5, 6,
+		7, 8,
+	}, 4, 2, 1)
+
+	denseKeyValues := []float32{
+		0.5, 1.5,
+		-1, 2,
+		0.25, -0.5,
+		3, 4,
+	}
+	value := ctx.FromFloats([]float32{
+		10, 20,
+		30, 40,
+		50, 60,
+	}, 3, 1, 2)
+
+	row0, err := turboquant.EncodeVector([]float32{0.5, -1, 0.25, 3}, turboquant.PresetTQ35)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row1, err := turboquant.EncodeVector([]float32{1.5, 2, -0.5, 4}, turboquant.PresetTQ35)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row0Bytes, err := row0.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	row1Bytes, err := row1.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(row0Bytes) != len(row1Bytes) {
+		t.Fatalf("row size mismatch: %d vs %d", len(row0Bytes), len(row1Bytes))
+	}
+
+	compressedKey := ctx.FromBytes(ml.DTypeTQ35, append(append([]byte{}, row0Bytes...), row1Bytes...), len(row0Bytes), 2)
+	denseKey := ctx.FromFloats(denseKeyValues, 4, 1, 2)
+
+	queryTensor := query.(*Tensor)
+	got := queryTensor.ScaledDotProductAttention(ctx, compressedKey, value, nil, nil, nil, 0.5, true)
+	want := queryTensor.ScaledDotProductAttention(ctx, denseKey, value, nil, nil, nil, 0.5, true)
+
+	ctx.Forward(got, want).Compute(got, want)
+	gotFloats := got.Floats()
+	wantFloats := want.Floats()
+	if len(gotFloats) != len(wantFloats) {
+		t.Fatalf("output length mismatch: %d vs %d", len(gotFloats), len(wantFloats))
+	}
+	for i := range gotFloats {
+		if math.Abs(float64(gotFloats[i]-wantFloats[i])) > 1.5 {
+			t.Fatalf("output[%d] = %v, want %v", i, gotFloats[i], wantFloats[i])
+		}
+	}
 }
 
 func TestInferShape(t *testing.T) {

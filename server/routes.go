@@ -569,6 +569,15 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 					PromptEvalDuration: cr.PromptEvalDuration,
 					EvalCount:          cr.EvalCount,
 					EvalDuration:       cr.EvalDuration,
+					KVCacheRequested:   cr.KVCacheRequested,
+					KVCacheEffective:   cr.KVCacheEffective,
+					ResolvedKVCacheType: cr.ResolvedKVCacheType,
+					KVAlgoResolved:     cr.KVAlgoResolved,
+					KVCacheBackend:     cr.KVCacheBackend,
+					KVCachePath:        cr.KVCachePath,
+					KVCacheBytes:       cr.KVCacheBytes,
+					WeightsBytes:       cr.WeightsBytes,
+					TotalVRAMBytes:     cr.TotalVRAMBytes,
 				},
 				Logprobs: toAPILogprobs(cr.Logprobs),
 			}
@@ -1225,9 +1234,11 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 				modelDetails.ParameterSize = format.HumanNumber(uint64(paramCount))
 			}
 		}
-		// Get torch_dtype directly from config.json for quantization level
-		if dtype, err := xserver.GetSafetensorsDtype(name); err == nil && dtype != "" {
-			modelDetails.QuantizationLevel = dtype
+		// Older manifests may not have file_type populated for safetensors models.
+		if modelDetails.QuantizationLevel == "" {
+			if dtype, err := xserver.GetSafetensorsDtype(name); err == nil && dtype != "" {
+				modelDetails.QuantizationLevel = dtype
+			}
 		}
 	}
 
@@ -1935,11 +1946,19 @@ func streamResponse(c *gin.Context, ch chan any) {
 
 func (s *Server) StatusHandler(c *gin.Context) {
 	disabled, source := internalcloud.Status()
+
+	contextLength := int(envconfig.ContextLength())
+	if contextLength == 0 {
+		slog.Warn("OLLAMA_CONTEXT_LENGTH is not set, using default", "default", s.defaultNumCtx)
+		contextLength = s.defaultNumCtx
+	}
+
 	c.JSON(http.StatusOK, api.StatusResponse{
 		Cloud: api.CloudStatus{
 			Disabled: disabled,
 			Source:   source,
 		},
+		ContextLength: contextLength,
 	})
 }
 
@@ -2422,6 +2441,15 @@ func (s *Server) ChatHandler(c *gin.Context) {
 						PromptEvalDuration: r.PromptEvalDuration,
 						EvalCount:          r.EvalCount,
 						EvalDuration:       r.EvalDuration,
+						KVCacheRequested:   r.KVCacheRequested,
+						KVCacheEffective:   r.KVCacheEffective,
+						ResolvedKVCacheType: r.ResolvedKVCacheType,
+						KVAlgoResolved:     r.KVAlgoResolved,
+						KVCacheBackend:     r.KVCacheBackend,
+						KVCachePath:        r.KVCachePath,
+						KVCacheBytes:       r.KVCacheBytes,
+						WeightsBytes:       r.WeightsBytes,
+						TotalVRAMBytes:     r.TotalVRAMBytes,
 					},
 					Logprobs: toAPILogprobs(r.Logprobs),
 				}

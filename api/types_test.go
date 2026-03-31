@@ -168,6 +168,53 @@ func TestUseMmapParsingFromJSON(t *testing.T) {
 	}
 }
 
+func TestKVCacheTypeParsingFromJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		req  string
+		exp  string
+	}{
+		{
+			name: "Undefined",
+			req:  `{ }`,
+			exp:  "",
+		},
+		{
+			name: "TurboQuantCanonical",
+			req:  `{ "kv_cache_type": "tq35" }`,
+			exp:  "tq35",
+		},
+		{
+			name: "AliasPreservedAtParseLayer",
+			req:  `{ "kv_cache_type": "tq3" }`,
+			exp:  "tq3",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var oMap map[string]any
+			err := json.Unmarshal([]byte(test.req), &oMap)
+			require.NoError(t, err)
+			opts := DefaultOptions()
+			err = opts.FromMap(oMap)
+			require.NoError(t, err)
+			assert.Equal(t, test.exp, opts.KVCacheType)
+		})
+	}
+}
+
+func TestKVCacheBackendParsingFromJSON(t *testing.T) {
+	var oMap map[string]any
+	err := json.Unmarshal([]byte(`{ "kv_cache_backend": "cuda" }`), &oMap)
+	require.NoError(t, err)
+
+	opts := DefaultOptions()
+	err = opts.FromMap(oMap)
+	require.NoError(t, err)
+	assert.Equal(t, "cuda", opts.KVCacheBackend)
+}
+
 func TestUseMmapFormatParams(t *testing.T) {
 	tr := true
 	fa := false
@@ -229,6 +276,28 @@ func TestUseMmapFormatParams(t *testing.T) {
 				assert.Equal(t, *test.exp, *respVal.(*bool))
 			}
 		})
+	}
+}
+
+func TestKVCacheTypeFormatParams(t *testing.T) {
+	resp, err := FormatParams(map[string][]string{
+		"kv_cache_type": {"tq35"},
+	})
+	require.NoError(t, err)
+
+	if got := resp["kv_cache_type"]; got != "tq35" {
+		t.Fatalf("kv_cache_type = %v, want tq35", got)
+	}
+}
+
+func TestKVCacheBackendFormatParams(t *testing.T) {
+	resp, err := FormatParams(map[string][]string{
+		"kv_cache_backend": {"cuda"},
+	})
+	require.NoError(t, err)
+
+	if got := resp["kv_cache_backend"]; got != "cuda" {
+		t.Fatalf("kv_cache_backend = %v, want cuda", got)
 	}
 }
 

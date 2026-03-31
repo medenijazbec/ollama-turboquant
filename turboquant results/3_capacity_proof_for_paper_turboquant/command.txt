@@ -1,0 +1,26 @@
+3. Capacity proof for paper TurboQuant
+
+Tests:
+- baseline and turbo hosts
+- baseline runs f16 and marks unsupported tq rows explicitly
+- compare how far f16 vs tq35 can go before spill or failure
+- lite staircase
+- 16k and 32k with conc=1 only
+- extra-lite matrix for about 15 to 30 minutes on 2x Tesla M40
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --host-kv-support legacy,request \
+  --profile staircase \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --kv-modes f16,tq35 \
+  --workloads near-oom-staircase \
+  --num-ctx 16384,32768 \
+  --concurrency 1 \
+  --warmup 0 \
+  --epochs 1 \
+  --timeout 0 \
+  --output /results_full/3_capacity_proof_for_paper_turboquant/capacity_paper.csv \
+  --jsonl-output /results_full/3_capacity_proof_for_paper_turboquant/capacity_paper.jsonl \
+  --summary-output /results_full/3_capacity_proof_for_paper_turboquant/capacity_paper.txt

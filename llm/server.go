@@ -120,6 +120,23 @@ type ollamaServer struct {
 	tokenizer tokenizer.Tokenizer // tokenizer handles text encoding/decoding
 }
 
+type kvCacheMode struct {
+	Requested string
+	Effective string
+	Aliased   bool
+}
+
+type kvCacheBackendMode struct {
+	Requested string
+	Effective string
+}
+
+type kvCacheSelection struct {
+	Mode    kvCacheMode
+	Assigned string
+	Warning string
+}
+
 // LoadModel will load a model from disk. The model must be in the GGML format.
 //
 // It collects array values for arrays with a size less than or equal to
@@ -210,7 +227,8 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 		fa = false
 	}
 
-	kvct := strings.ToLower(envconfig.KvCacheType())
+	mode := resolveKVCacheMode(opts)
+	backendMode := resolveKVCacheBackendMode(opts)
 
 	if tok == nil {
 		flashAttention := ml.FlashAttentionAuto
@@ -222,23 +240,13 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			}
 		}
 
-		if kvct != "" {
-			if f.KVCacheTypeIsQuantized(kvct) {
-				if flashAttention != ml.FlashAttentionEnabled {
-					slog.Warn("OLLAMA_FLASH_ATTENTION must be enabled to use a quantized OLLAMA_KV_CACHE_TYPE", "type", kvct)
-					loadRequest.KvCacheType = ""
-				} else if f.SupportsKVCacheType(kvct) {
-					loadRequest.KvCacheType = kvct
-				} else {
-					slog.Warn("unsupported OLLAMA_KV_CACHE_TYPE", "type", kvct)
-				}
-			} else {
-				if f.SupportsKVCacheType(kvct) {
-					loadRequest.KvCacheType = kvct
-				} else {
-					slog.Warn("unsupported OLLAMA_KV_CACHE_TYPE", "type", kvct)
-				}
-			}
+		selection := selectLegacyKVCacheType(mode, flashAttention, f.SupportsKVCacheType, f.KVCacheTypeIsQuantized)
+		if selection.Assigned != "" {
+			loadRequest.KvCacheType = selection.Assigned
+			loadRequest.KvCacheBackend = backendMode.Effective
+			logAcceptedKVCacheType(selection.Mode)
+		} else if selection.Warning != "" {
+			logRejectedKVCacheType(selection)
 		}
 		loadRequest.FlashAttention = flashAttention
 	} else {
@@ -247,15 +255,19 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			slog.Info("enabling flash attention")
 			loadRequest.FlashAttention = ml.FlashAttentionEnabled
 
-			// Flash Attention also supports kv cache quantization
-			// Enable if the requested and kv cache type is supported by the model
-			if f.SupportsKVCacheType(kvct) {
-				loadRequest.KvCacheType = kvct
-			} else {
-				slog.Warn("kv cache type not supported by model", "type", kvct)
+			selection := selectEngineKVCacheType(mode, true, f.SupportsKVCacheType)
+			if selection.Assigned != "" {
+				loadRequest.KvCacheType = selection.Assigned
+				loadRequest.KvCacheBackend = backendMode.Effective
+				logAcceptedKVCacheType(selection.Mode)
+			} else if selection.Warning != "" {
+				logRejectedKVCacheType(selection)
 			}
-		} else if kvct != "" && kvct != "f16" {
-			slog.Warn("quantized kv cache requested but flash attention disabled", "type", kvct)
+		} else {
+			selection := selectEngineKVCacheType(mode, false, f.SupportsKVCacheType)
+			if selection.Warning != "" {
+				logRejectedKVCacheType(selection)
+			}
 		}
 	}
 
@@ -317,6 +329,111 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 	} else {
 		return &llamaServer{llmServer: s, ggml: f}, nil
 	}
+}
+
+func normalizeKVCacheType(cacheType string) string {
+	switch strings.ToLower(cacheType) {
+	case "tq3", "tq4":
+		return "tq35"
+	default:
+		return strings.ToLower(cacheType)
+	}
+}
+
+func resolveKVCacheMode(opts api.Options) kvCacheMode {
+	if opts.KVCacheType != "" {
+		return newKVCacheMode(opts.KVCacheType)
+	}
+
+	return newKVCacheMode(envconfig.KvCacheType())
+}
+
+func normalizeKVCacheBackend(backend string) string {
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case "", "cuda":
+		return strings.ToLower(strings.TrimSpace(backend))
+	default:
+		return ""
+	}
+}
+
+func resolveKVCacheBackendMode(opts api.Options) kvCacheBackendMode {
+	if opts.KVCacheBackend != "" {
+		return kvCacheBackendMode{
+			Requested: strings.ToLower(strings.TrimSpace(opts.KVCacheBackend)),
+			Effective: normalizeKVCacheBackend(opts.KVCacheBackend),
+		}
+	}
+
+	value := envconfig.KvCacheBackend()
+	return kvCacheBackendMode{
+		Requested: strings.ToLower(strings.TrimSpace(value)),
+		Effective: normalizeKVCacheBackend(value),
+	}
+}
+
+func newKVCacheMode(cacheType string) kvCacheMode {
+	requested := strings.ToLower(cacheType)
+	effective := normalizeKVCacheType(cacheType)
+
+	return kvCacheMode{
+		Requested: requested,
+		Effective: effective,
+		Aliased:   requested != "" && requested != effective,
+	}
+}
+
+func selectLegacyKVCacheType(mode kvCacheMode, flashAttention ml.FlashAttentionType, supports func(string) bool, isQuantized func(string) bool) kvCacheSelection {
+	if mode.Effective == "" {
+		return kvCacheSelection{Mode: mode}
+	}
+
+	if !supports(mode.Effective) {
+		return kvCacheSelection{Mode: mode, Warning: "unsupported OLLAMA_KV_CACHE_TYPE"}
+	}
+
+	if isQuantized(mode.Effective) && flashAttention != ml.FlashAttentionEnabled {
+		return kvCacheSelection{Mode: mode, Warning: "OLLAMA_FLASH_ATTENTION must be enabled to use a quantized OLLAMA_KV_CACHE_TYPE"}
+	}
+
+	return kvCacheSelection{Mode: mode, Assigned: mode.Effective}
+}
+
+func selectEngineKVCacheType(mode kvCacheMode, flashAttentionEnabled bool, supports func(string) bool) kvCacheSelection {
+	if mode.Effective == "" {
+		return kvCacheSelection{Mode: mode}
+	}
+
+	if !supports(mode.Effective) {
+		return kvCacheSelection{Mode: mode, Warning: "kv cache type not supported by model"}
+	}
+
+	if mode.Effective != "f16" && !flashAttentionEnabled {
+		return kvCacheSelection{Mode: mode, Warning: "quantized kv cache requested but flash attention disabled"}
+	}
+
+	return kvCacheSelection{Mode: mode, Assigned: mode.Effective}
+}
+
+func kvCacheModeLogAttrs(mode kvCacheMode) []any {
+	attrs := []any{}
+	if mode.Aliased {
+		attrs = append(attrs, "requested", mode.Requested)
+	}
+	attrs = append(attrs, "effective", mode.Effective)
+	return attrs
+}
+
+func logAcceptedKVCacheType(mode kvCacheMode) {
+	slog.Info("using kv cache type", kvCacheModeLogAttrs(mode)...)
+}
+
+func logRejectedKVCacheType(selection kvCacheSelection) {
+	attrs := kvCacheModeLogAttrs(selection.Mode)
+	if len(attrs) == 0 {
+		attrs = append(attrs, "effective", selection.Mode.Effective)
+	}
+	slog.Warn(selection.Warning, attrs...)
 }
 
 func StartRunner(ollamaEngine bool, modelPath string, gpuLibs []string, out io.Writer, extraEnvs map[string]string) (cmd *exec.Cmd, port int, err error) {
@@ -478,6 +595,7 @@ type LoadRequest struct {
 	FlashAttention ml.FlashAttentionType
 	KvSize         int
 	KvCacheType    string
+	KvCacheBackend string
 	NumThreads     int
 	GPULayers      ml.GPULayersList
 	MultiUserCache bool
@@ -1520,6 +1638,15 @@ type CompletionResponse struct {
 	PromptEvalDuration time.Duration `json:"prompt_eval_duration"`
 	EvalCount          int           `json:"eval_count"`
 	EvalDuration       time.Duration `json:"eval_duration"`
+	KVCacheRequested   string        `json:"kv_cache_requested,omitempty"`
+	KVCacheEffective   string        `json:"kv_cache_effective,omitempty"`
+	ResolvedKVCacheType string       `json:"resolved_kv_cache_type,omitempty"`
+	KVAlgoResolved     string        `json:"kv_algo_resolved,omitempty"`
+	KVCacheBackend     string        `json:"kv_cache_backend,omitempty"`
+	KVCachePath        string        `json:"kv_cache_path,omitempty"`
+	KVCacheBytes       uint64        `json:"kv_cache_bytes,omitempty"`
+	WeightsBytes       uint64        `json:"weights_bytes,omitempty"`
+	TotalVRAMBytes     uint64        `json:"total_vram_bytes,omitempty"`
 
 	// Logprobs contains log probability information if requested
 	Logprobs []Logprob `json:"logprobs,omitempty"`

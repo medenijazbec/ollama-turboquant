@@ -38,6 +38,17 @@ type BackendCacheConfig interface {
 	CacheConfig() CacheConfig
 }
 
+type TurboQuantSupport struct {
+	CPU  bool
+	CUDA bool
+}
+
+// TurboQuantBackend is implemented by backends that can consume TurboQuant
+// storage directly without fallback decode in the cache layer.
+type TurboQuantBackend interface {
+	TurboQuantSupport() TurboQuantSupport
+}
+
 // CacheConfig controls optimizations (mostly backend-specific) that may transform
 // the output the cache to work better with specific kernels.
 type CacheConfig struct {
@@ -326,7 +337,7 @@ func Dump(ctx Context, t Tensor, optsFuncs ...DumpOptions) string {
 		return dump[[]float32](ctx, t, opts.EdgeItems, func(f float32) string {
 			return strconv.FormatFloat(float64(f), 'f', opts.Precision, 32)
 		})
-	case DTypeF16, DTypeQ80, DTypeQ40:
+	case DTypeF16, DTypeQ80, DTypeQ40, DTypeTQ25, DTypeTQ35:
 		f32 := ctx.Input().Empty(DTypeF32, t.Shape()...)
 		f32 = t.Copy(ctx, f32)
 		return dump[[]float32](ctx, f32, opts.EdgeItems, func(f float32) string {
@@ -402,6 +413,8 @@ const (
 	DTypeF16
 	DTypeQ80
 	DTypeQ40
+	DTypeTQ25
+	DTypeTQ35
 	DTypeI32
 	DTypeMXFP4
 )

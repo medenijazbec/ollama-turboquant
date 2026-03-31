@@ -146,6 +146,7 @@ console.log(response.message.content);
 
 - [CLI reference](https://docs.ollama.com/cli)
 - [REST API reference](https://docs.ollama.com/api)
+- [TurboQuant guide](https://docs.ollama.com/turboquant)
 - [Importing models](https://docs.ollama.com/import)
 - [Modelfile reference](https://docs.ollama.com/modelfile)
 - [Building from source](https://github.com/ollama/ollama/blob/main/docs/development.md)

@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/ollama/ollama/ml"
 )
 
 // https://github.com/ollama/ollama/issues/7978
@@ -101,5 +103,22 @@ func TestSchemaToGrammar(t *testing.T) {
 				t.Errorf("grammar = %q, want %q", g, c.prefix)
 			}
 		})
+	}
+}
+
+func TestNewContextParamsRejectsTurboQuant(t *testing.T) {
+	for _, cacheType := range []string{"tq25", "tq35", "tq3", "tq4"} {
+		if _, err := NewContextParams(128, 16, 1, 1, ml.FlashAttentionDisabled, cacheType); err == nil {
+			t.Fatalf("NewContextParams(..., %q) error = nil, want rejection", cacheType)
+		} else {
+			if !strings.Contains(err.Error(), "legacy llama runner") {
+				t.Fatalf("NewContextParams(..., %q) error = %q, want legacy llama runner message", cacheType, err)
+			}
+			if cacheType == "tq3" || cacheType == "tq4" {
+				if !strings.Contains(err.Error(), "tq35") {
+					t.Fatalf("NewContextParams(..., %q) error = %q, want normalized tq35", cacheType, err)
+				}
+			}
+		}
 	}
 }

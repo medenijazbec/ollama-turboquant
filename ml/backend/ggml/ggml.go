@@ -36,6 +36,7 @@ import (
 	"github.com/ollama/ollama/ml"
 	ggml "github.com/ollama/ollama/ml/backend/ggml/ggml/src"
 	"github.com/ollama/ollama/ml/nn/rope"
+	"github.com/ollama/ollama/turboquant"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -691,6 +692,27 @@ func (b *Backend) CacheConfig() ml.CacheConfig {
 	}
 }
 
+func (b *Backend) TurboQuantSupport() ml.TurboQuantSupport {
+	if b.flashAttention != ml.FlashAttentionEnabled {
+		return ml.TurboQuantSupport{}
+	}
+
+	for _, backend := range b.schedBackends {
+		dev := C.ggml_backend_get_device(backend)
+		switch C.ggml_backend_dev_type(dev) {
+		case C.GGML_BACKEND_DEVICE_TYPE_GPU, C.GGML_BACKEND_DEVICE_TYPE_IGPU:
+			return ml.TurboQuantSupport{}
+		}
+	}
+
+	return ml.TurboQuantSupport{CPU: true}
+}
+
+func (b *Backend) SupportsTurboQuantFastPath() bool {
+	support := b.TurboQuantSupport()
+	return support.CPU || support.CUDA
+}
+
 func (b *Backend) BackendDevices() []ml.DeviceInfo {
 	deviceInfos := []ml.DeviceInfo{}
 	for _, dev := range gpus {
@@ -1101,6 +1123,10 @@ func (t *Tensor) DType() ml.DType {
 		return ml.DTypeQ80
 	case C.GGML_TYPE_Q4_0:
 		return ml.DTypeQ40
+	case C.GGML_TYPE_OLLAMA_TQ25_KV:
+		return ml.DTypeTQ25
+	case C.GGML_TYPE_OLLAMA_TQ35_KV:
+		return ml.DTypeTQ35
 	case C.GGML_TYPE_I32:
 		return ml.DTypeI32
 	case C.GGML_TYPE_MXFP4:
@@ -1120,6 +1146,10 @@ func ggmlDType(dtype ml.DType) uint32 {
 		return C.GGML_TYPE_Q8_0
 	case ml.DTypeQ40:
 		return C.GGML_TYPE_Q4_0
+	case ml.DTypeTQ25:
+		return C.GGML_TYPE_OLLAMA_TQ25_KV
+	case ml.DTypeTQ35:
+		return C.GGML_TYPE_OLLAMA_TQ35_KV
 	case ml.DTypeI32:
 		return C.GGML_TYPE_I32
 	case ml.DTypeMXFP4:
@@ -1714,7 +1744,32 @@ func (t *Tensor) ScaledDotProductAttention(ctx ml.Context, key, value, mask, sin
 		kqMask = mask.(*Tensor).t
 	}
 
+	if key.DType() == ml.DTypeTQ25 || key.DType() == ml.DTypeTQ35 {
+		if !t.b.TurboQuantSupport().CPU {
+			slog.Debug("skipping turboquant cpu attention fast path", "dtype", key.DType(), "reason", "backend does not support fast path")
+		}
+	}
+
 	query := t.Permute(ctx, 0, 2, 1, 3)
+	if (key.DType() == ml.DTypeTQ25 || key.DType() == ml.DTypeTQ35) && t.b.TurboQuantSupport().CPU {
+		slog.Debug("using turboquant cpu attention fast path", "dtype", key.DType(), "cpu_only", true)
+		kq := turboQuantAttentionScores(ctx, query, key)
+		kq = &Tensor{
+			b: t.b,
+			t: C.ggml_soft_max_ext(ctx.(*Context).ctx, kq.(*Tensor).t, kqMask, C.float(scale), 0),
+		}
+		if sinks != nil {
+			C.ggml_soft_max_add_sinks(kq.(*Tensor).t, sinks.(*Tensor).t)
+		}
+
+		kqv := value.Mulmat(ctx, kq)
+		if vmla != nil {
+			kqv = vmla.Mulmat(ctx, kqv)
+		}
+
+		return kqv.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx)
+	}
+
 	key = key.Permute(ctx, 0, 2, 1, 3)
 
 	if t.b.flashAttention == ml.FlashAttentionEnabled {
@@ -1753,6 +1808,94 @@ func (t *Tensor) ScaledDotProductAttention(ctx ml.Context, key, value, mask, sin
 
 		return kqv.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx)
 	}
+}
+
+func turboQuantAttentionScores(ctx ml.Context, query, key ml.Tensor) ml.Tensor {
+	queryFloats := tensorAsF32(ctx, query)
+	keyBytes := key.Bytes()
+
+	headDim := query.Dim(0)
+	seqLenQ := query.Dim(1)
+	numHeads := query.Dim(2)
+	rowBytes := key.Dim(0)
+	cachedSize := key.Dim(1)
+	if rowBytes <= 0 || cachedSize <= 0 {
+		panic("invalid turboquant key tensor shape")
+	}
+	if len(keyBytes) != rowBytes*cachedSize {
+		panic(fmt.Sprintf("turboquant key byte size mismatch: got %d want %d", len(keyBytes), rowBytes*cachedSize))
+	}
+
+	firstPreset, err := presetForEncodedRow(keyBytes[:rowBytes])
+	if err != nil {
+		panic(err)
+	}
+
+	kvHeads := queryKVHeads(headDim, firstPreset, keyBytes[:rowBytes])
+	if kvHeads <= 0 || numHeads%kvHeads != 0 {
+		panic(fmt.Sprintf("invalid turboquant kv head mapping: query heads %d kv heads %d", numHeads, kvHeads))
+	}
+	groupSize := numHeads / kvHeads
+
+	kqData := make([]float32, cachedSize*seqLenQ*numHeads)
+	for head := 0; head < numHeads; head++ {
+		kvHead := head / groupSize
+		for q := 0; q < seqLenQ; q++ {
+			queryVector := make([]float32, headDim)
+			for d := 0; d < headDim; d++ {
+				queryVector[d] = queryFloats[d+headDim*q+headDim*seqLenQ*head]
+			}
+			expandedQuery := queryVectorForKVHead(queryVector, kvHead, kvHeads)
+
+			for cell := 0; cell < cachedSize; cell++ {
+				row := keyBytes[cell*rowBytes : (cell+1)*rowBytes]
+				score, _, err := turboquant.ScoreEncodedVector(expandedQuery, row)
+				if err != nil {
+					panic(err)
+				}
+				kqData[cell+cachedSize*q+cachedSize*seqLenQ*head] = score
+			}
+		}
+	}
+
+	return ctx.Input().FromFloats(kqData, cachedSize, seqLenQ, numHeads)
+}
+
+func tensorAsF32(ctx ml.Context, t ml.Tensor) []float32 {
+	f32 := t
+	if t.DType() != ml.DTypeF32 {
+		f32 = ctx.Input().Empty(ml.DTypeF32, t.Shape()...)
+		f32 = t.Copy(ctx, f32)
+	}
+	ctx.Forward(f32).Compute(f32)
+	return append([]float32(nil), f32.Floats()...)
+}
+
+func presetForEncodedRow(row []byte) (turboquant.Preset, error) {
+	_, preset, err := turboquant.DecodeVector(row)
+	return preset, err
+}
+
+func queryKVHeads(headDim int, preset turboquant.Preset, row []byte) int {
+	values, _, err := turboquant.DecodeVector(row)
+	if err != nil {
+		panic(err)
+	}
+	if len(values)%headDim != 0 {
+		panic(fmt.Sprintf("turboquant row dim %d is not divisible by head dim %d for preset %s", len(values), headDim, preset.Name))
+	}
+	return len(values) / headDim
+}
+
+func queryVectorForKVHead(queryVector []float32, kvHead, kvHeads int) []float32 {
+	if kvHeads <= 1 {
+		return queryVector
+	}
+
+	headDim := len(queryVector)
+	expanded := make([]float32, headDim*kvHeads)
+	copy(expanded[kvHead*headDim:(kvHead+1)*headDim], queryVector)
+	return expanded
 }
 
 func (t *Tensor) Duplicate(ctx ml.Context) ml.Tensor {

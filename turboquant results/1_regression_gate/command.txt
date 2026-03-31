@@ -1,0 +1,20 @@
+1. Regression gate for paper TurboQuant rollout
+
+Tests:
+- stock f16 vs turbo f16
+- fork regression only
+- decode-growth at ctx=8192, conc=1
+- lite regression matrix for about 30 minutes on 2x Tesla M40
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --profile regression \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --warmup 1 \
+  --epochs 3 \
+  --max-tokens 768 \
+  --timeout 0 \
+  --output /results_full/1_regression_gate/regression_paper.csv \
+  --jsonl-output /results_full/1_regression_gate/regression_paper.jsonl \
+  --summary-output /results_full/1_regression_gate/regression_paper.txt

@@ -847,15 +847,17 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 
 // SupportsKVCacheType checks if the requested cache type is supported
 func (f GGML) SupportsKVCacheType(cacheType string) bool {
+	cacheType = normalizeKVCacheType(cacheType)
 	if cacheType == "" || cacheType == "f16" {
 		return true
 	}
 
-	return slices.Contains([]string{"q8_0", "q4_0"}, cacheType)
+	return slices.Contains([]string{"q8_0", "q4_0", "tq25", "tq35"}, cacheType)
 }
 
 // KVCacheTypeIsQuantized checks if the requested cache type is a quantized type
 func (f GGML) KVCacheTypeIsQuantized(cacheType string) bool {
+	cacheType = normalizeKVCacheType(cacheType)
 	if cacheType == "" || cacheType == "f16" || cacheType == "f32" || cacheType == "bf16" {
 		return false
 	}
@@ -874,7 +876,7 @@ func (f GGML) SupportsFlashAttention() bool {
 		return true
 	}
 
-	if slices.Contains([]string{"gemma2"}, arch) {
+	if slices.Contains([]string{"gemma2", "grok"}, arch) {
 		return false
 	}
 
@@ -906,14 +908,28 @@ func (f GGML) FlashAttention() bool {
 
 // kvCacheBytesPerElement returns the number of bytes per element for a given KV cache type
 func kvCacheBytesPerElement(cacheType string) float64 {
+	cacheType = normalizeKVCacheType(cacheType)
 	switch cacheType {
 	case "q8_0":
 		return 1 // 1/2 of fp16
 	case "q4_0":
 		return 0.5 // 1/4 of fp16
+	case "tq25":
+		return 0.3125
+	case "tq35":
+		return 0.4375
 	case "f32":
 		return 4 // f32 (default for recurrent)
 	default:
 		return 2 // f16 (default)
+	}
+}
+
+func normalizeKVCacheType(cacheType string) string {
+	switch strings.ToLower(cacheType) {
+	case "tq3", "tq4":
+		return "tq35"
+	default:
+		return strings.ToLower(cacheType)
 	}
 }

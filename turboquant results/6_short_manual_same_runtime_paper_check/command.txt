@@ -1,0 +1,27 @@
+6. Short manual same-runtime paper check
+
+Tests:
+- baseline and turbo hosts
+- baseline runs f16 and marks unsupported tq rows explicitly
+- turbo f16 vs turbo tq35
+- decode-focused lite matrix
+- 8k and 16k with conc=1
+- slightly heavier lite matrix for about 5 to 15 minutes on 2x Tesla M40
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --host-kv-support legacy,request \
+  --profile quick \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --kv-modes f16,tq35 \
+  --workloads decode-growth \
+  --num-ctx 8192,16384 \
+  --concurrency 1 \
+  --warmup 0 \
+  --epochs 1 \
+  --max-tokens 512 \
+  --timeout 0 \
+  --output /results_full/6_short_manual_same_runtime_paper_check/short_same_runtime_paper.csv \
+  --jsonl-output /results_full/6_short_manual_same_runtime_paper_check/short_same_runtime_paper.jsonl \
+  --summary-output /results_full/6_short_manual_same_runtime_paper_check/short_same_runtime_paper.txt

@@ -21,6 +21,22 @@ import (
 	"github.com/ollama/ollama/types/model"
 )
 
+func addRunHandlerFlags(cmd *cobra.Command) {
+	cmd.Flags().String("keepalive", "", "")
+	cmd.Flags().Bool("truncate", false, "")
+	cmd.Flags().Int("dimensions", 0, "")
+	cmd.Flags().Bool("verbose", false, "")
+	cmd.Flags().Bool("insecure", false, "")
+	cmd.Flags().Bool("nowordwrap", false, "")
+	cmd.Flags().String("format", "", "")
+	cmd.Flags().String("turboquant", "", "")
+	cmd.Flags().Lookup("turboquant").NoOptDefVal = "tq35"
+	cmd.Flags().String("turboquant-cuda", "", "")
+	cmd.Flags().Lookup("turboquant-cuda").NoOptDefVal = "tq35"
+	cmd.Flags().String("think", "", "")
+	cmd.Flags().Bool("hidethinking", false, "")
+}
+
 func TestShowInfo(t *testing.T) {
 	t.Run("bare details", func(t *testing.T) {
 		var b bytes.Buffer
@@ -301,7 +317,7 @@ Weigh anchor!
 				ParameterSize:     "7B",
 				QuantizationLevel: "FP16",
 			},
-			Requires: "0.14.0",
+			Requires: "0.19.0",
 		}, false, &b); err != nil {
 			t.Fatal(err)
 		}
@@ -310,13 +326,183 @@ Weigh anchor!
     architecture    test      
     parameters      7B        
     quantization    FP16      
-    requires        0.14.0    
+    requires        0.19.0
 
 `
-		if diff := cmp.Diff(expect, b.String()); diff != "" {
+		trimLinePadding := func(s string) string {
+			lines := strings.Split(s, "\n")
+			for i, line := range lines {
+				lines[i] = strings.TrimRight(line, " \t\r")
+			}
+			return strings.Join(lines, "\n")
+		}
+		if diff := cmp.Diff(trimLinePadding(expect), trimLinePadding(b.String())); diff != "" {
 			t.Errorf("unexpected output (-want +got):\n%s", diff)
 		}
 	})
+}
+
+func TestNormalizeTurboQuantFlag(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{in: "", want: "", ok: true},
+		{in: "tq35", want: "tq35", ok: true},
+		{in: "TQ25", want: "tq25", ok: true},
+		{in: "off", want: "f16", ok: true},
+		{in: "bad", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := normalizeTurboQuantFlag(tt.in)
+			if tt.ok {
+				if err != nil {
+					t.Fatalf("normalizeTurboQuantFlag(%q) returned error: %v", tt.in, err)
+				}
+				if got != tt.want {
+					t.Fatalf("normalizeTurboQuantFlag(%q) = %q, want %q", tt.in, got, tt.want)
+				}
+			} else if err == nil {
+				t.Fatalf("normalizeTurboQuantFlag(%q) = nil error, want error", tt.in)
+			}
+		})
+	}
+}
+
+func TestLoadOrUnloadModelIncludesKVCacheTypeOption(t *testing.T) {
+	var got api.GenerateRequest
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(api.GenerateResponse{Done: true})
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+
+	err := loadOrUnloadModel(cmd, &runOptions{
+		Model:   "test-model",
+		Options: map[string]any{"kv_cache_type": "tq35"},
+	})
+	if err != nil {
+		t.Fatalf("loadOrUnloadModel returned error: %v", err)
+	}
+
+	if got.Options["kv_cache_type"] != "tq35" {
+		t.Fatalf("generate request kv_cache_type = %v, want tq35", got.Options["kv_cache_type"])
+	}
+}
+
+func TestRunHandlerTurboQuantAddsGenerateOption(t *testing.T) {
+	var got api.GenerateRequest
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityCompletion},
+			})
+		case r.URL.Path == "/api/generate" && r.Method == http.MethodPost:
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.GenerateResponse{Done: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	addRunHandlerFlags(cmd)
+	if err := cmd.Flags().Set("turboquant", "tq25"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RunHandler(cmd, []string{"test-model", "hello"})
+	if err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+
+	if got.Options["kv_cache_type"] != "tq25" {
+		t.Fatalf("generate request kv_cache_type = %v, want tq25", got.Options["kv_cache_type"])
+	}
+}
+
+func TestRunHandlerTurboQuantIgnoredForEmbeddingModels(t *testing.T) {
+	var embedReq api.EmbedRequest
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityEmbedding},
+			})
+		case r.URL.Path == "/api/embed" && r.Method == http.MethodPost:
+			if err := json.NewDecoder(r.Body).Decode(&embedReq); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.EmbedResponse{Embeddings: [][]float32{{1, 2, 3}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	addRunHandlerFlags(cmd)
+	if err := cmd.Flags().Set("turboquant", "tq35"); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStderr := os.Stderr
+	readErr, writeErr, _ := os.Pipe()
+	os.Stderr = writeErr
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	err := RunHandler(cmd, []string{"test-embedding-model", "hello"})
+
+	_ = writeErr.Close()
+	var out bytes.Buffer
+	_, _ = io.Copy(&out, readErr)
+
+	if err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+	if !strings.Contains(out.String(), "warning: --turboquant is ignored for embedding models") {
+		t.Fatalf("expected embedding warning, got %q", out.String())
+	}
+	if len(embedReq.Options) != 0 {
+		t.Fatalf("embed request options = %v, want empty options map", embedReq.Options)
+	}
 }
 
 func TestDeleteHandler(t *testing.T) {
@@ -1912,7 +2098,7 @@ func TestShowInfoImageGen(t *testing.T) {
 			QuantizationLevel: "Q8",
 		},
 		Capabilities: []model.Capability{model.CapabilityImage},
-		Requires:     "0.14.0",
+		Requires:     "0.19.0",
 	}, false, &b)
 	if err != nil {
 		t.Fatal(err)
@@ -1922,7 +2108,7 @@ func TestShowInfoImageGen(t *testing.T) {
 		"    architecture    ZImagePipeline    \n" +
 		"    parameters      10.3B             \n" +
 		"    quantization    Q8                \n" +
-		"    requires        0.14.0            \n" +
+		"    requires        0.19.0            \n" +
 		"\n" +
 		"  Capabilities\n" +
 		"    image    \n" +

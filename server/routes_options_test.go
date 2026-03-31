@@ -125,3 +125,74 @@ func TestModelOptionsNumCtxPriority(t *testing.T) {
 		})
 	}
 }
+
+func TestModelOptionsKVCacheTypePriority(t *testing.T) {
+	tests := []struct {
+		name          string
+		modelKV       string
+		requestKV     string
+		expectedKV    string
+	}{
+		{
+			name:       "unset by default",
+			expectedKV: "",
+		},
+		{
+			name:       "model default applies",
+			modelKV:    "tq35",
+			expectedKV: "tq35",
+		},
+		{
+			name:       "request overrides model",
+			modelKV:    "tq25",
+			requestKV:  "f16",
+			expectedKV: "f16",
+		},
+		{
+			name:       "request applies without model default",
+			requestKV:  "tq25",
+			expectedKV: "tq25",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{}
+
+			var modelOpts map[string]any
+			if tt.modelKV != "" {
+				modelOpts = map[string]any{"kv_cache_type": tt.modelKV}
+			}
+
+			var requestOpts map[string]any
+			if tt.requestKV != "" {
+				requestOpts = map[string]any{"kv_cache_type": tt.requestKV}
+			}
+
+			opts, err := s.modelOptions(&Model{Options: modelOpts}, requestOpts)
+			if err != nil {
+				t.Fatalf("modelOptions failed: %v", err)
+			}
+
+			if opts.KVCacheType != tt.expectedKV {
+				t.Fatalf("KVCacheType = %q, want %q", opts.KVCacheType, tt.expectedKV)
+			}
+		})
+	}
+}
+
+func TestModelOptionsKVCacheBackendPriority(t *testing.T) {
+	s := &Server{}
+
+	opts, err := s.modelOptions(
+		&Model{Options: map[string]any{"kv_cache_backend": "cpu"}},
+		map[string]any{"kv_cache_backend": "cuda"},
+	)
+	if err != nil {
+		t.Fatalf("modelOptions failed: %v", err)
+	}
+
+	if opts.KVCacheBackend != "cuda" {
+		t.Fatalf("KVCacheBackend = %q, want %q", opts.KVCacheBackend, "cuda")
+	}
+}

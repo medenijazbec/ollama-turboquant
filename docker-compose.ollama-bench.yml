@@ -1,0 +1,19 @@
+name: ollama-main-turboquant-bench
+
+services:
+  ollama-bench:
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama-bench
+    gpus: all
+    working_dir: /work
+    network_mode: host
+    stdin_open: true
+    tty: true
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility
+    volumes:
+      - ../results:/results
+      - ../results_full:/results_full
+    command: ["sleep", "infinity"]

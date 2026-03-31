@@ -1,0 +1,24 @@
+# Regression Summary
+
+- supported=0 unsupported=0 failed=0
+- no regression rows available
+
+# TurboQuant Same-Runtime Summary
+
+- supported=3 unsupported=0 failed=0
+- no same-runtime full-GPU rows available
+
+# Product Claim vs Baseline
+
+- supported=4 unsupported=0 failed=0
+- no baseline-vs-fork product rows available
+
+# Memory / Capacity Summary
+
+- supported=5 unsupported=1 failed=0
+- baseline | f16 | max_full_gpu_ctx=0 | max_full_gpu_ctx_x_conc=0 | max_stable_ctx_x_conc=65536 | max_live_kv_tokens_total=59240 | first_spill_ctx_x_conc=0 | first_failure_ctx_x_conc=0 | reason=
+- baseline | tq35 | max_full_gpu_ctx=0 | max_full_gpu_ctx_x_conc=0 | max_stable_ctx_x_conc=0 | max_live_kv_tokens_total=0 | first_spill_ctx_x_conc=0 | first_failure_ctx_x_conc=0 | reason=unsupported kv_cache_type on target host
+- turbo | f16 | max_full_gpu_ctx=32768 | max_full_gpu_ctx_x_conc=32768 | max_stable_ctx_x_conc=65536 | max_live_kv_tokens_total=59240 | first_spill_ctx_x_conc=0 | first_failure_ctx_x_conc=0 | reason=
+- turbo | tq35 | max_full_gpu_ctx=0 | max_full_gpu_ctx_x_conc=0 | max_stable_ctx_x_conc=65536 | max_live_kv_tokens_total=59240 | first_spill_ctx_x_conc=0 | first_failure_ctx_x_conc=0 | reason=
+- claim: On baseline, tq35 increases max full-GPU ctx x conc by 0.00% and max stable ctx x conc by -100.00% before failure
+- claim: On turbo, tq35 increases max full-GPU ctx x conc by -100.00% and max stable ctx x conc by 0.00% before failure

@@ -1,0 +1,19 @@
+# Regression Summary
+
+- supported=0 unsupported=0 failed=0
+- no regression rows available
+
+# TurboQuant Same-Runtime Summary
+
+- supported=3 unsupported=0 failed=0
+- no same-runtime full-GPU rows available
+
+# Product Claim vs Baseline
+
+- supported=2 unsupported=0 failed=0
+- no baseline-vs-fork product rows available
+
+# Memory / Capacity Summary
+
+- supported=0 unsupported=0 failed=0
+- no capacity rows available

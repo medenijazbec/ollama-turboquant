@@ -270,6 +270,43 @@ func TestKeyValue(t *testing.T) {
 	}
 }
 
+func TestSupportsKVCacheTypeTurboQuant(t *testing.T) {
+	f := GGML{}
+
+	for _, cacheType := range []string{"tq25", "tq35", "tq3", "tq4", "TQ35", "Tq3"} {
+		if !f.SupportsKVCacheType(cacheType) {
+			t.Fatalf("SupportsKVCacheType(%q) = false, want true", cacheType)
+		}
+	}
+}
+
+func TestKVCacheTypeIsQuantizedTurboQuant(t *testing.T) {
+	f := GGML{}
+
+	for _, cacheType := range []string{"tq25", "tq35", "tq3", "tq4", "TQ35", "Tq4"} {
+		if !f.KVCacheTypeIsQuantized(cacheType) {
+			t.Fatalf("KVCacheTypeIsQuantized(%q) = false, want true", cacheType)
+		}
+	}
+}
+
+func TestKVCacheBytesPerElementTurboQuant(t *testing.T) {
+	tests := map[string]float64{
+		"tq25": 0.3125,
+		"tq35": 0.4375,
+		"tq3":  0.4375,
+		"tq4":  0.4375,
+		"TQ35": 0.4375,
+		"Tq3":  0.4375,
+	}
+
+	for cacheType, want := range tests {
+		if got := kvCacheBytesPerElement(cacheType); got != want {
+			t.Fatalf("kvCacheBytesPerElement(%q) = %v, want %v", cacheType, got, want)
+		}
+	}
+}
+
 func TestHeadCount(t *testing.T) {
 	valuesArray := []int32{1, 5, 3, 4}
 	cases := []struct {

@@ -1,0 +1,82 @@
+ARG CUDA_VERSION=11.8.0
+ARG UBUNTU_VERSION=22.04
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
+
+ARG OLLAMA_VERSION=v0.17.7
+ARG GO_VERSION=auto
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl wget gnupg pkg-config \
+      build-essential ninja-build binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN CMAKE_VERSION=3.28.6 && \
+    curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+      | tar --strip-components=1 -xz -C /usr/local
+
+WORKDIR /src
+COPY . .
+
+RUN set -eux; \
+    if [ "${GO_VERSION}" = "auto" ]; then \
+      if grep -qE '^toolchain go' go.mod; then \
+        GO_VER="$(grep -E '^toolchain go' go.mod | awk '{print $2}' | sed 's/^go//')"; \
+      else \
+        GO_VER="$(grep -E '^go [0-9]+\.[0-9]+' go.mod | awk '{print $2}')"; \
+      fi; \
+    else \
+      GO_VER="${GO_VERSION}"; \
+    fi; \
+    echo "Using Go ${GO_VER}"; \
+    curl -fsSL "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz" | tar -xzC /usr/local; \
+    /usr/local/go/bin/go version
+
+ENV PATH=/usr/local/go/bin:$PATH
+
+RUN set -eux; \
+    cmake -S . -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_ARCHITECTURES=52; \
+    cmake --build build -j"$(nproc)"; \
+    test -d build/lib/ollama
+
+RUN set -eux; \
+    mkdir -p /out/bin /out/lib/ollama; \
+    PKG="."; \
+    if [ -d "./cmd/ollama" ]; then PKG="./cmd/ollama"; fi; \
+    CGO_ENABLED=1 GOFLAGS="-buildvcs=false" \
+      go build -trimpath -o /out/bin/ollama "${PKG}"; \
+    test -x /out/bin/ollama; \
+    cp -a build/lib/ollama/. /out/lib/ollama/; \
+    for pat in libcudart.so.11* libcublas.so.11* libcublasLt.so.11*; do \
+      for p in /usr/local/cuda/targets/x86_64-linux/lib/${pat} /usr/local/cuda/lib64/${pat}; do \
+        if [ -e "$p" ]; then cp -a "$p" /out/lib/ollama/; fi; \
+      done; \
+    done; \
+    test "$(find /out/lib/ollama -type f -name '*.so*' | wc -l)" -gt 0
+
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/bin/ollama /bin/ollama
+COPY --from=build /out/lib/ollama /lib/ollama
+
+ENV LD_LIBRARY_PATH=/lib/ollama:${LD_LIBRARY_PATH}
+
+RUN set -eux; \
+    if [ -d /lib/ollama/cuda_v11 ] && [ ! -e /lib/ollama/cuda_v11_avx ]; then ln -s cuda_v11 /lib/ollama/cuda_v11_avx; fi; \
+    if [ -d /lib/ollama/cuda_v11_avx ] && [ ! -e /lib/ollama/cuda_v11 ]; then ln -s cuda_v11_avx /lib/ollama/cuda_v11; fi
+
+ENV OLLAMA_HOST=0.0.0.0:11434
+EXPOSE 11434
+
+ENTRYPOINT ["/bin/ollama"]
+CMD ["serve"]

@@ -51,7 +51,7 @@ Generate a response for a given prompt with a provided model. This is a streamin
 Advanced parameters (optional):
 
 - `format`: the format to return a response in. Format can be `json` or a JSON schema
-- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature`
+- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature` and `kv_cache_type`
 - `system`: system message to (overrides what is defined in the `Modelfile`)
 - `template`: the prompt template to use (overrides what is defined in the `Modelfile`)
 - `stream`: if `false` the response will be returned as a single response object, rather than a stream of objects
@@ -411,6 +411,7 @@ curl http://localhost:11434/api/generate -d '{
     "stop": ["\n", "user:"],
     "numa": false,
     "num_ctx": 1024,
+    "kv_cache_type": "tq35",
     "num_batch": 2,
     "num_gpu": 1,
     "main_gpu": 0,
@@ -437,6 +438,8 @@ curl http://localhost:11434/api/generate -d '{
   "eval_duration": 4289432000
 }
 ```
+
+`kv_cache_type` can be used to override the KV cache mode for a single request. Valid values are `f16`, `q8_0`, `q4_0`, `tq25`, and `tq35`. Compatibility aliases `tq3` and `tq4` normalize to `tq35`.
 
 #### Load a model
 
@@ -517,7 +520,7 @@ The `message` object has the following fields:
 Advanced parameters (optional):
 
 - `format`: the format to return a response in. Format can be `json` or a JSON schema.
-- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature`
+- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature` and `kv_cache_type`
 - `stream`: if `false` the response will be returned as a single response object, rather than a stream of objects
 - `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `5m`)
 
@@ -1708,7 +1711,7 @@ Generate embeddings from a model
 Advanced parameters:
 
 - `truncate`: truncates the end of each input to fit within context length. Returns error if `false` and context length is exceeded. Defaults to `true`
-- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature`
+- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature` and `kv_cache_type`
 - `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `5m`)
 - `dimensions`: number of dimensions for the embedding
 
@@ -1827,7 +1830,7 @@ Generate embeddings from a model
 
 Advanced parameters:
 
-- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature`
+- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature` and `kv_cache_type`
 - `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `5m`)
 
 ### Examples

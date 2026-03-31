@@ -574,6 +574,15 @@ type Metrics struct {
 	PromptEvalDuration time.Duration `json:"prompt_eval_duration,omitempty"`
 	EvalCount          int           `json:"eval_count,omitempty"`
 	EvalDuration       time.Duration `json:"eval_duration,omitempty"`
+	KVCacheRequested   string        `json:"kv_cache_requested,omitempty"`
+	KVCacheEffective   string        `json:"kv_cache_effective,omitempty"`
+	ResolvedKVCacheType string       `json:"resolved_kv_cache_type,omitempty"`
+	KVAlgoResolved     string        `json:"kv_algo_resolved,omitempty"`
+	KVCacheBackend     string        `json:"kv_cache_backend,omitempty"`
+	KVCachePath        string        `json:"kv_cache_path,omitempty"`
+	KVCacheBytes       uint64        `json:"kv_cache_bytes,omitempty"`
+	WeightsBytes       uint64        `json:"weights_bytes,omitempty"`
+	TotalVRAMBytes     uint64        `json:"total_vram_bytes,omitempty"`
 }
 
 // Options specified in [GenerateRequest].  If you add a new option here, also
@@ -599,12 +608,14 @@ type Options struct {
 
 // Runner options which must be set when the model is loaded into memory
 type Runner struct {
-	NumCtx    int   `json:"num_ctx,omitempty"`
-	NumBatch  int   `json:"num_batch,omitempty"`
-	NumGPU    int   `json:"num_gpu,omitempty"`
-	MainGPU   int   `json:"main_gpu,omitempty"`
-	UseMMap   *bool `json:"use_mmap,omitempty"`
-	NumThread int   `json:"num_thread,omitempty"`
+	NumCtx         int   `json:"num_ctx,omitempty"`
+	NumBatch       int   `json:"num_batch,omitempty"`
+	NumGPU         int   `json:"num_gpu,omitempty"`
+	MainGPU        int   `json:"main_gpu,omitempty"`
+	UseMMap        *bool `json:"use_mmap,omitempty"`
+	NumThread      int   `json:"num_thread,omitempty"`
+	KVCacheType    string `json:"kv_cache_type,omitempty"`
+	KVCacheBackend string `json:"kv_cache_backend,omitempty"`
 }
 
 // EmbedRequest is the request passed to [Client.Embed].
@@ -841,7 +852,8 @@ type CloudStatus struct {
 
 // StatusResponse is the response from [Client.CloudStatusExperimental].
 type StatusResponse struct {
-	Cloud CloudStatus `json:"cloud"`
+	Cloud         CloudStatus `json:"cloud"`
+	ContextLength int         `json:"context_length,omitempty"`
 }
 
 // GenerateResponse is the response passed into [GenerateResponseFunc].

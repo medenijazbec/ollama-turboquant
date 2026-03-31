@@ -1,0 +1,40 @@
+FROM golang:1.24.1-bookworm AS build
+
+WORKDIR /src
+COPY . .
+
+RUN go get github.com/NVIDIA/go-nvml/pkg/nvml@v0.12.4-1 && go mod download
+RUN go build -trimpath -o /out/ollama-bench ./cmd/bench
+RUN go build -trimpath -o /out/kvstress-bench ./cmd/benchkv
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      pciutils \
+      procps \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/ollama-bench /usr/local/bin/ollama-bench
+COPY --from=build /out/kvstress-bench /usr/local/bin/kvstress-bench
+COPY scripts/run-native-ollama-bench-qwen35.sh /scripts/run-native-ollama-bench-qwen35.sh
+COPY scripts/run-turboquant-ollama-bench-qwen35.sh /scripts/run-turboquant-ollama-bench-qwen35.sh
+COPY scripts/run-kvstress-ab.sh /scripts/run-kvstress-ab.sh
+COPY scripts/run-kvstress-quick.sh /scripts/run-kvstress-quick.sh
+COPY scripts/run-kvstress-full.sh /scripts/run-kvstress-full.sh
+COPY scripts/run-kvstress-staircase.sh /scripts/run-kvstress-staircase.sh
+COPY scripts/run-kvstress-capacity.sh /scripts/run-kvstress-capacity.sh
+COPY scripts/run-kvstress-spill.sh /scripts/run-kvstress-spill.sh
+
+RUN chmod +x /scripts/run-native-ollama-bench-qwen35.sh \
+    /scripts/run-turboquant-ollama-bench-qwen35.sh \
+    /scripts/run-kvstress-ab.sh \
+    /scripts/run-kvstress-quick.sh \
+    /scripts/run-kvstress-full.sh \
+    /scripts/run-kvstress-staircase.sh \
+    /scripts/run-kvstress-capacity.sh \
+    /scripts/run-kvstress-spill.sh
+
+WORKDIR /work
+
+CMD ["sleep", "infinity"]

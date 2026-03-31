@@ -1,0 +1,24 @@
+# Regression Summary
+
+- supported=4 unsupported=0 failed=0
+- baseline | f16 | decode-growth | ctx=8192 | conc=1 | prefill=245.34 tok/s | decode=19.65 tok/s | ttft=8673.51 ms | total=35005.91 ms
+- baseline | f16 | decode-growth | ctx=16384 | conc=1 | prefill=244.79 tok/s | decode=19.63 tok/s | ttft=19776.99 ms | total=46140.11 ms
+- turbo | f16 | decode-growth | ctx=8192 | conc=1 | prefill=249.36 tok/s | decode=28.15 tok/s | ttft=19263.85 ms | total=37732.10 ms
+- turbo | f16 | decode-growth | ctx=16384 | conc=1 | prefill=245.84 tok/s | decode=28.32 tok/s | ttft=19519.25 ms | total=37908.32 ms
+- claim: On the same model and workload, the TurboQuant fork in f16 is within 1.64% of stock f16 for prefill, 43.23% for decode, 122.10% for TTFT, and 7.79% for total time at ctx=8192 conc=1
+- claim: On the same model and workload, the TurboQuant fork in f16 is within 0.43% of stock f16 for prefill, 44.25% for decode, 1.30% for TTFT, and 17.84% for total time at ctx=16384 conc=1
+
+# TurboQuant Same-Runtime Summary
+
+- supported=4 unsupported=0 failed=0
+- no same-runtime full-GPU rows available
+
+# Product Claim vs Baseline
+
+- supported=4 unsupported=0 failed=0
+- no baseline-vs-fork product rows available
+
+# Memory / Capacity Summary
+
+- supported=0 unsupported=0 failed=0
+- no capacity rows available

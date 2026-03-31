@@ -1,0 +1,108 @@
+package turboquant
+
+import "math"
+
+const qjlUnbiasScale = 1.2533141373155001 // sqrt(pi / 2)
+
+type ResidualSketch struct {
+	Seed      uint64
+	Scale     float32 // residual L2 norm; retained name keeps the old struct shape stable
+	SketchDim uint16
+	Signs     []byte
+}
+
+func encodeResidual(rotated, approx []float32, sketchSpec any, seed uint64) ResidualSketch {
+	sketchRows := 0
+	switch v := sketchSpec.(type) {
+	case int:
+		sketchRows = v
+	case Preset:
+		sketchRows = v.KeyQJLRows(len(rotated))
+	default:
+		return ResidualSketch{}
+	}
+	if sketchRows <= 0 || len(rotated) == 0 {
+		return ResidualSketch{}
+	}
+
+	residual := make([]float32, len(rotated))
+	var l2 float64
+	for i := range rotated {
+		delta := rotated[i] - approx[i]
+		residual[i] = delta
+		l2 += float64(delta * delta)
+	}
+
+	if l2 == 0 {
+		return ResidualSketch{
+			Seed:      seed,
+			SketchDim: uint16(sketchRows),
+			Signs:     make([]byte, expectedPackedBytes(sketchRows, 1)),
+		}
+	}
+
+	signBits := make([]uint8, sketchRows)
+	for row := 0; row < sketchRows; row++ {
+		if gaussianProjectionDot(residual, seed, row) >= 0 {
+			signBits[row] = 1
+		}
+	}
+
+	return ResidualSketch{
+		Seed:      seed,
+		Scale:     float32(math.Sqrt(l2)),
+		SketchDim: uint16(sketchRows),
+		Signs:     packBits(signBits, 1),
+	}
+}
+
+func reconstructResidual(dim int, sketch ResidualSketch) []float32 {
+	out := make([]float32, dim)
+	if dim == 0 || sketch.SketchDim == 0 || sketch.Scale == 0 {
+		return out
+	}
+
+	signBits := unpackBits(sketch.Signs, 1, int(sketch.SketchDim))
+	scale := float32(qjlUnbiasScale) * sketch.Scale / float32(sketch.SketchDim)
+	for row, bit := range signBits {
+		sign := float32(-1)
+		if bit == 1 {
+			sign = 1
+		}
+		for col := 0; col < dim; col++ {
+			out[col] += sign * gaussianProjectionEntry(sketch.Seed, row, col) * scale
+		}
+	}
+	return out
+}
+
+func residualDotCorrection(queryRot []float32, sketch ResidualSketch) float32 {
+	if len(queryRot) == 0 || sketch.SketchDim == 0 || sketch.Scale == 0 {
+		return 0
+	}
+
+	signBits := unpackBits(sketch.Signs, 1, int(sketch.SketchDim))
+	var total float32
+	for row, bit := range signBits {
+		sign := float32(-1)
+		if bit == 1 {
+			sign = 1
+		}
+		total += sign * gaussianProjectionDot(queryRot, sketch.Seed, row)
+	}
+
+	return float32(qjlUnbiasScale) * sketch.Scale * (total / float32(sketch.SketchDim))
+}
+
+func gaussianProjectionDot(values []float32, seed uint64, row int) float32 {
+	var out float32
+	for col, value := range values {
+		out += value * gaussianProjectionEntry(seed, row, col)
+	}
+	return out
+}
+
+func gaussianProjectionEntry(seed uint64, row, col int) float32 {
+	local := splitmix64(seed ^ uint64(row+1)*0x9e3779b97f4a7c15 ^ uint64(col+1)*0xbf58476d1ce4e5b9)
+	return float32(gaussianFloat64(&local))
+}

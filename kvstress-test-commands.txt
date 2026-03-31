@@ -1,0 +1,171 @@
+KVSTRESS TEST COMMANDS FOR PAPER TURBOQUANT
+
+All commands below write unique output files into:
+/srv/share/ollama-benchmark/results
+
+All commands below use `--timeout 0`, which means unlimited runtime.
+
+Container compose file:
+/srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml
+
+0. Native baseline GPU verification
+Tests:
+- stock Ollama at `11438` can load and run on GPU
+- `full_gpu_residency` is true for the baseline host
+- baseline is suitable for regression and product-outcome comparisons
+
+If this run shows CPU-only or mixed residency, do not use:
+- regression
+- product-outcome
+
+Instead, use:
+- turbo-benefit
+- capacity
+- spill
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438 \
+  --host-labels baseline \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --kv-modes f16 \
+  --workloads decode-growth \
+  --num-ctx 4096 \
+  --concurrency 1 \
+  --warmup 0 \
+  --epochs 1 \
+  --timeout 0 \
+  --output /results/native_baseline_gpu_check_paper.csv \
+  --jsonl-output /results/native_baseline_gpu_check_paper.jsonl \
+  --summary-output /results/native_baseline_gpu_check_paper.txt
+
+1. Regression gate for paper TurboQuant rollout
+Tests:
+- stock f16 vs turbo f16
+- fork regression only
+- decode-growth at ctx=8192, conc=1
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --profile regression \
+  --timeout 0 \
+  --output /results/regression_paper.csv \
+  --jsonl-output /results/regression_paper.jsonl \
+  --summary-output /results/regression_paper.txt
+
+2. Same-runtime paper TurboQuant proof
+Tests:
+- turbo runtime only
+- turbo f16 vs turbo tq25 vs turbo tq35
+- same-runtime causal speed and live-KV benefit
+- headline speed rows are full-GPU only
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --profile turbo-benefit \
+  --timeout 0 \
+  --output /results/turbo_benefit_paper.csv \
+  --jsonl-output /results/turbo_benefit_paper.jsonl \
+  --summary-output /results/turbo_benefit_paper.txt
+
+3. Capacity proof for paper TurboQuant
+Tests:
+- turbo runtime only
+- staircase until first spill/offload or failure
+- max full-GPU envelope and max stable envelope
+- main memory/capacity claim
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --profile capacity \
+  --timeout 0 \
+  --output /results/capacity_paper.csv \
+  --jsonl-output /results/capacity_paper.jsonl \
+  --summary-output /results/capacity_paper.txt
+
+4. Spill-allowed survival for paper TurboQuant
+Tests:
+- turbo runtime only
+- continues beyond full-GPU limit
+- measures host RAM growth and stable range with spill allowed
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --profile spill \
+  --timeout 0 \
+  --output /results/spill_paper.csv \
+  --jsonl-output /results/spill_paper.jsonl \
+  --summary-output /results/spill_paper.txt
+
+5. Fast first pass for paper TurboQuant
+Tests:
+- quick memory + throughput signal
+- one memory-focused cell and one decode-throughput cell
+- good for old GPUs before longer proof runs
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --kv-modes f16,tq35 \
+  --profile impact \
+  --timeout 0 \
+  --output /results/impact_paper.csv \
+  --jsonl-output /results/impact_paper.jsonl \
+  --summary-output /results/impact_paper.txt
+
+6. Short manual same-runtime paper check
+Tests:
+- shorter custom KV-pressure matrix
+- useful when turbo-benefit is too long
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --kv-modes f16,tq35 \
+  --workloads prefill-heavy,decode-growth \
+  --num-ctx 16384,32768 \
+  --concurrency 1,2 \
+  --warmup 1 \
+  --epochs 2 \
+  --timeout 0 \
+  --output /results/short_same_runtime_paper.csv \
+  --jsonl-output /results/short_same_runtime_paper.jsonl \
+  --summary-output /results/short_same_runtime_paper.txt
+
+7. Product-outcome check for paper TurboQuant
+Tests:
+- stock f16 vs turbo tq35
+- end-user outcome comparison
+- not causal by itself, but useful alongside turbo-benefit
+
+docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-compose.ollama-bench.yml exec ollama-bench kvstress-bench \
+  --hosts http://127.0.0.1:11438,http://127.0.0.1:11439 \
+  --host-labels baseline,turbo \
+  --model qwen3-30b:instruct2507-udq4kxl \
+  --kv-modes f16,tq35 \
+  --workloads prefill-heavy \
+  --num-ctx 16384,32768 \
+  --concurrency 1,2 \
+  --warmup 1 \
+  --epochs 2 \
+  --timeout 0 \
+  --output /results/product_outcome_paper.csv \
+  --jsonl-output /results/product_outcome_paper.jsonl \
+  --summary-output /results/product_outcome_paper.txt
+
+Suggested run order:
+0. native_baseline_gpu_check
+1. regression
+2. impact
+3. turbo_benefit
+4. capacity
+5. spill

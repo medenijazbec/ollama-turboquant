@@ -61,6 +61,9 @@ components:
         num_ctx:
           type: integer
           description: Context length size (number of tokens)
+        kv_cache_type:
+          type: string
+          description: KV cache mode override. Use f16, q8_0, q4_0, tq25, tq35, or compatibility aliases tq3 and tq4.
         num_predict:
           type: integer
           description: Maximum number of tokens to generate

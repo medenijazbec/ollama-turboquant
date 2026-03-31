@@ -30,6 +30,7 @@ func createTestFlagOptions() flagOptions {
 	debug := false
 	warmup := 0
 	promptTokens := 0
+	turboquant := ""
 
 	return flagOptions{
 		models:       &models,
@@ -46,6 +47,7 @@ func createTestFlagOptions() flagOptions {
 		debug:        &debug,
 		warmup:       &warmup,
 		promptTokens: &promptTokens,
+		turboquant:   &turboquant,
 	}
 }
 
@@ -188,6 +190,62 @@ func TestBenchmarkModel_Success(t *testing.T) {
 	}
 	if !strings.Contains(output, "BenchmarkModel/name=test-model/step=ttft") {
 		t.Errorf("Expected output to contain ttft metrics, got: %s", output)
+	}
+}
+
+func TestNormalizeTurboQuantFlag(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{in: "", want: "", ok: true},
+		{in: "tq35", want: "tq35", ok: true},
+		{in: "off", want: "f16", ok: true},
+		{in: "bad", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := normalizeTurboQuantFlag(tt.in)
+			if tt.ok {
+				if err != nil {
+					t.Fatalf("normalizeTurboQuantFlag(%q) returned error: %v", tt.in, err)
+				}
+				if got != tt.want {
+					t.Fatalf("normalizeTurboQuantFlag(%q) = %q, want %q", tt.in, got, tt.want)
+				}
+			} else if err == nil {
+				t.Fatalf("normalizeTurboQuantFlag(%q) = nil error, want error", tt.in)
+			}
+		})
+	}
+}
+
+func TestBuildGenerateRequestIncludesKVCacheType(t *testing.T) {
+	fOpt := createTestFlagOptions()
+	mode := "tq25"
+	fOpt.turboquant = &mode
+
+	req := buildGenerateRequest("test-model", fOpt, nil, 0)
+
+	if got := req.Options["kv_cache_type"]; got != "tq25" {
+		t.Fatalf("kv_cache_type = %v, want tq25", got)
+	}
+}
+
+func TestBuildGenerateRequestIncludesKVCacheBackendForCUDA(t *testing.T) {
+	fOpt := createTestFlagOptions()
+	mode := "tq35"
+	fOpt.turboquantCUDA = &mode
+
+	req := buildGenerateRequest("test-model", fOpt, nil, 0)
+
+	if got := req.Options["kv_cache_type"]; got != "tq35" {
+		t.Fatalf("kv_cache_type = %v, want tq35", got)
+	}
+	if got := req.Options["kv_cache_backend"]; got != "cuda" {
+		t.Fatalf("kv_cache_backend = %v, want cuda", got)
 	}
 }
 

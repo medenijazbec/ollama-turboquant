@@ -119,7 +119,12 @@ type ContextParams struct {
 	c C.struct_llama_context_params
 }
 
-func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, flashAttention ml.FlashAttentionType, kvCacheType string) ContextParams {
+func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, flashAttention ml.FlashAttentionType, kvCacheType string) (ContextParams, error) {
+	kvCacheType = normalizeKVCacheType(kvCacheType)
+	if kvCacheType == "tq25" || kvCacheType == "tq35" {
+		return ContextParams{}, fmt.Errorf("legacy llama runner does not support TurboQuant KV cache type %q", kvCacheType)
+	}
+
 	params := C.llama_context_default_params()
 	params.n_ctx = C.uint(numCtx)
 	params.n_batch = C.uint(batchSize * numSeqMax)
@@ -136,10 +141,10 @@ func NewContextParams(numCtx int, batchSize int, numSeqMax int, threads int, fla
 	case ml.FlashAttentionAuto:
 		params.flash_attn_type = int32(C.LLAMA_FLASH_ATTN_TYPE_AUTO)
 	}
-	params.type_k = kvCacheTypeFromStr(strings.ToLower(kvCacheType))
-	params.type_v = kvCacheTypeFromStr(strings.ToLower(kvCacheType))
+	params.type_k = kvCacheTypeFromStr(kvCacheType)
+	params.type_v = kvCacheTypeFromStr(kvCacheType)
 
-	return ContextParams{c: params}
+	return ContextParams{c: params}, nil
 }
 
 // kvCacheTypeFromStr converts a string cache type to the corresponding GGML type value
@@ -155,6 +160,15 @@ func kvCacheTypeFromStr(s string) C.enum_ggml_type {
 		return C.GGML_TYPE_Q4_0
 	default:
 		return C.GGML_TYPE_F16
+	}
+}
+
+func normalizeKVCacheType(s string) string {
+	switch strings.ToLower(s) {
+	case "tq3", "tq4":
+		return "tq35"
+	default:
+		return strings.ToLower(s)
 	}
 }
 

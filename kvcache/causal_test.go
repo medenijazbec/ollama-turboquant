@@ -623,6 +623,7 @@ func TestCanResumeSWAMem(t *testing.T) {
 type testBackend struct {
 	ml.Backend
 	permutedV bool
+	fastPath  bool
 }
 
 func (b *testBackend) NewContext() ml.Context {
@@ -635,6 +636,10 @@ func (b *testBackend) NewContextSize(int) ml.Context {
 
 func (b *testBackend) CacheConfig() ml.CacheConfig {
 	return ml.CacheConfig{PermutedV: b.permutedV}
+}
+
+func (b *testBackend) TurboQuantSupport() ml.TurboQuantSupport {
+	return ml.TurboQuantSupport{CPU: b.fastPath}
 }
 
 type testContext struct {
@@ -651,7 +656,18 @@ func (c *testContext) Empty(dtype ml.DType, shape ...int) ml.Tensor {
 		}
 	}
 
-	return &testTensor{dtype: dtype, elementSize: 4, data: make([]float32, total), shape: shape}
+	elementSize := 4
+	if dtype == ml.DTypeTQ25 || dtype == ml.DTypeTQ35 {
+		elementSize = 1
+	}
+
+	return &testTensor{
+		dtype:       dtype,
+		elementSize: elementSize,
+		data:        make([]float32, total),
+		rawBytes:    make([]byte, total*elementSize),
+		shape:       shape,
+	}
 }
 
 func (c *testContext) Zeros(dtype ml.DType, shape ...int) ml.Tensor {
@@ -663,6 +679,12 @@ func (c *testContext) FromFloats(s []float32, shape ...int) ml.Tensor {
 
 	copy(t.data, s)
 
+	return t
+}
+
+func (c *testContext) FromBytes(dtype ml.DType, s []uint8, shape ...int) ml.Tensor {
+	t := c.Empty(dtype, shape...).(*testTensor)
+	copy(t.rawBytes, s)
 	return t
 }
 
@@ -710,6 +732,7 @@ type testTensor struct {
 	dtype       ml.DType
 	elementSize int
 	data        []float32
+	rawBytes    []byte
 	shape       []int
 }
 
@@ -738,6 +761,16 @@ func (t *testTensor) Floats() []float32 {
 	out := make([]float32, len(t.data))
 	copy(out, t.data)
 	return out
+}
+
+func (t *testTensor) Bytes() []byte {
+	out := make([]byte, len(t.rawBytes))
+	copy(out, t.rawBytes)
+	return out
+}
+
+func (t *testTensor) FromBytes(s []byte) {
+	t.rawBytes = append(t.rawBytes[:0], s...)
 }
 
 func (t *testTensor) Neg(ctx ml.Context) ml.Tensor {

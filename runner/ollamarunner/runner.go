@@ -378,6 +378,8 @@ type Server struct {
 
 	// KV cache
 	cache *InputCache
+	// Report the actual KV cache selection used by this runner.
+	kvCacheInfo KVCacheRuntimeInfo
 
 	// next sequence for prompt processing to avoid starvation
 	nextSeq int
@@ -977,6 +979,12 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					PromptEvalDuration: seq.processingDuration,
 					EvalCount:          seq.numPredicted,
 					EvalDuration:       seq.lastUpdatedAt.Sub(seq.startedAt) - seq.samplingDuration,
+					KVCacheRequested:   s.kvCacheInfo.Requested,
+					KVCacheEffective:   s.kvCacheInfo.Effective,
+					ResolvedKVCacheType: s.kvCacheInfo.Effective,
+					KVAlgoResolved:     s.kvCacheInfo.Algorithm,
+					KVCacheBackend:     s.kvCacheInfo.Backend,
+					KVCachePath:        s.kvCacheInfo.Path,
 				}); err != nil {
 					http.Error(w, fmt.Sprintf("failed to encode final response: %v", err), http.StatusInternalServerError)
 				}
@@ -1179,6 +1187,7 @@ func (s *Server) allocModel(
 	loraPath []string,
 	parallel int,
 	kvCacheType string,
+	kvCacheBackend string,
 	kvSize int,
 	multiUserCache bool,
 ) (panicErr error) {
@@ -1220,10 +1229,11 @@ func (s *Server) allocModel(
 		}
 	}
 
-	s.cache, err = NewInputCache(s.model, kvCacheType, int32(kvSize), parallel, s.batchSize, multiUserCache)
+	s.cache, err = NewInputCache(s.model, kvCacheType, kvCacheBackend, int32(kvSize), parallel, s.batchSize, multiUserCache)
 	if err != nil {
 		return err
 	}
+	s.kvCacheInfo = s.cache.RuntimeInfo()
 
 	s.parallel = parallel
 	s.seqs = make([]*Sequence, s.parallel)
@@ -1308,7 +1318,7 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 
 		s.batchSize = req.BatchSize
 
-		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KvSize, req.MultiUserCache)
+		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KvCacheBackend, req.KvSize, req.MultiUserCache)
 		if err != nil {
 			s.closeModel()
 

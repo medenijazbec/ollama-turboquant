@@ -45,6 +45,9 @@ type Causal struct {
 	// locations for data storage for this batch
 	curLoc ml.Tensor
 
+	// exact cache cell indexes selected for each token in the current batch
+	curLocs []int
+
 	// mask of the cache as used by this batch
 	curMask ml.Tensor
 
@@ -239,6 +242,11 @@ func (c *Causal) StartForward(ctx ml.Context, batch input.Batch, reserve bool) e
 		}
 		c.curCellRange.min = 0
 		c.curCellRange.max = len(c.cells) - 1
+	}
+
+	c.curLocs = make([]int, len(locs))
+	for i, loc := range locs {
+		c.curLocs[i] = int(loc)
 	}
 
 	c.curLoc = ctx.Input().FromInts(locs, len(locs))
