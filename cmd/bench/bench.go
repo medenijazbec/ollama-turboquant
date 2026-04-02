@@ -17,23 +17,25 @@ import (
 )
 
 type flagOptions struct {
-	models       *string
-	epochs       *int
-	maxTokens    *int
-	temperature  *float64
-	seed         *int
-	timeout      *int
-	prompt       *string
-	imageFile    *string
-	keepAlive    *float64
-	format       *string
-	outputFile   *string
-	debug        *bool
-	verbose      *bool
-	warmup       *int
-	promptTokens *int
-	turboquant   *string
+	models         *string
+	epochs         *int
+	maxTokens      *int
+	temperature    *float64
+	seed           *int
+	timeout        *int
+	prompt         *string
+	imageFile      *string
+	keepAlive      *float64
+	format         *string
+	outputFile     *string
+	debug          *bool
+	verbose        *bool
+	warmup         *int
+	promptTokens   *int
+	turboquant     *string
 	turboquantCUDA *string
+	cacheTypeK     *string
+	cacheTypeV     *string
 }
 
 type Metrics struct {
@@ -103,6 +105,24 @@ func normalizeTurboQuantFlag(value string) (string, error) {
 	return normalizeTurboQuantFlagValue("-turboquant", value)
 }
 
+func normalizeCacheTypeFlagValue(flagName, value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", "off":
+		if normalized == "off" {
+			return "f16", nil
+		}
+		return "", nil
+	case "f16", "q8_0", "q4_0", "tq25", "tq35", "tq3", "tq4":
+		if normalized == "tq3" || normalized == "tq4" {
+			return "tq35", nil
+		}
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid value for %s: %q (must be f16, q8_0, q4_0, tq25, tq35, tq3, tq4, or off)", flagName, value)
+	}
+}
+
 func expectedTurboQuantPath(kvCacheType string) string {
 	if override := strings.TrimSpace(os.Getenv("OLLAMA_BENCH_EXPECTED_PATH")); override != "" {
 		return override
@@ -142,6 +162,12 @@ func buildGenerateRequest(model string, fOpt flagOptions, imgData api.ImageData,
 		if *fOpt.turboquantCUDA != "f16" {
 			options["kv_cache_backend"] = "cuda"
 		}
+	}
+	if fOpt.cacheTypeK != nil && *fOpt.cacheTypeK != "" {
+		options["kv_cache_type_k"] = *fOpt.cacheTypeK
+	}
+	if fOpt.cacheTypeV != nil && *fOpt.cacheTypeV != "" {
+		options["kv_cache_type_v"] = *fOpt.cacheTypeV
 	}
 
 	var keepAliveDuration *api.Duration
@@ -536,23 +562,25 @@ func readImage(filePath string) (api.ImageData, error) {
 
 func main() {
 	fOpt := flagOptions{
-		models:       flag.String("model", "", "Model to benchmark"),
-		epochs:       flag.Int("epochs", 6, "Number of epochs (iterations) per model"),
-		maxTokens:    flag.Int("max-tokens", 200, "Maximum tokens for model response"),
-		temperature:  flag.Float64("temperature", 0, "Temperature parameter"),
-		seed:         flag.Int("seed", 0, "Random seed"),
-		timeout:      flag.Int("timeout", 60*5, "Timeout in seconds (default 300s)"),
-		prompt:       flag.String("p", DefaultPrompt, "Prompt to use"),
-		imageFile:    flag.String("image", "", "Filename for an image to include"),
-		keepAlive:    flag.Float64("k", 0, "Keep alive duration in seconds"),
-		format:       flag.String("format", "benchstat", "Output format [benchstat|csv]"),
-		outputFile:   flag.String("output", "", "Output file for results (stdout if empty)"),
-		verbose:      flag.Bool("v", false, "Show system information"),
-		debug:        flag.Bool("debug", false, "Show debug information"),
-		warmup:       flag.Int("warmup", 1, "Number of warmup requests before timing"),
-		promptTokens: flag.Int("prompt-tokens", 0, "Generate prompt targeting ~N tokens (0 = use -p prompt)"),
-		turboquant:   flag.String("turboquant", "", "Enable TurboQuant KV cache for this benchmark (tq35, tq25, tq3, tq4, off)"),
+		models:         flag.String("model", "", "Model to benchmark"),
+		epochs:         flag.Int("epochs", 6, "Number of epochs (iterations) per model"),
+		maxTokens:      flag.Int("max-tokens", 200, "Maximum tokens for model response"),
+		temperature:    flag.Float64("temperature", 0, "Temperature parameter"),
+		seed:           flag.Int("seed", 0, "Random seed"),
+		timeout:        flag.Int("timeout", 60*5, "Timeout in seconds (default 300s)"),
+		prompt:         flag.String("p", DefaultPrompt, "Prompt to use"),
+		imageFile:      flag.String("image", "", "Filename for an image to include"),
+		keepAlive:      flag.Float64("k", 0, "Keep alive duration in seconds"),
+		format:         flag.String("format", "benchstat", "Output format [benchstat|csv]"),
+		outputFile:     flag.String("output", "", "Output file for results (stdout if empty)"),
+		verbose:        flag.Bool("v", false, "Show system information"),
+		debug:          flag.Bool("debug", false, "Show debug information"),
+		warmup:         flag.Int("warmup", 1, "Number of warmup requests before timing"),
+		promptTokens:   flag.Int("prompt-tokens", 0, "Generate prompt targeting ~N tokens (0 = use -p prompt)"),
+		turboquant:     flag.String("turboquant", "", "Enable TurboQuant KV cache for this benchmark (tq35, tq25, tq3, tq4, off)"),
 		turboquantCUDA: flag.String("turboquant-cuda", "", "Request CUDA TurboQuant KV cache for this benchmark (tq35, tq25, tq3, tq4, off)"),
+		cacheTypeK:     flag.String("cache-type-k", "", "Override K cache type for this benchmark (f16, q8_0, q4_0, tq25, tq35, off)"),
+		cacheTypeV:     flag.String("cache-type-v", "", "Override V cache type for this benchmark (f16, q8_0, q4_0, tq25, tq35, off)"),
 	}
 
 	flag.Usage = func() {
@@ -582,6 +610,22 @@ func main() {
 	if *fOpt.turboquant != "" && *fOpt.turboquantCUDA != "" {
 		fmt.Fprintln(os.Stderr, "ERROR: only one of -turboquant or -turboquant-cuda may be specified")
 		os.Exit(1)
+	}
+	if fOpt.cacheTypeK != nil {
+		normalizedK, err := normalizeCacheTypeFlagValue("-cache-type-k", *fOpt.cacheTypeK)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+		*fOpt.cacheTypeK = normalizedK
+	}
+	if fOpt.cacheTypeV != nil {
+		normalizedV, err := normalizeCacheTypeFlagValue("-cache-type-v", *fOpt.cacheTypeV)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+		*fOpt.cacheTypeV = normalizedV
 	}
 
 	if !slices.Contains([]string{"benchstat", "csv"}, *fOpt.format) {

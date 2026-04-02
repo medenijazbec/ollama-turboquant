@@ -166,7 +166,7 @@ func TestRemainingStaircaseUnits(t *testing.T) {
 	}
 
 	got := remainingStaircaseUnits(cfg, 1, 16384)
-	want := 12
+	want := 9
 	if got != want {
 		t.Fatalf("remainingStaircaseUnits() = %d, want %d", got, want)
 	}

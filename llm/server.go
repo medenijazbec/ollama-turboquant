@@ -126,15 +126,23 @@ type kvCacheMode struct {
 	Aliased   bool
 }
 
+type kvCacheModes struct {
+	Unified    kvCacheMode
+	K          kvCacheMode
+	V          kvCacheMode
+	Symmetric  bool
+	Asymmetric bool
+}
+
 type kvCacheBackendMode struct {
 	Requested string
 	Effective string
 }
 
 type kvCacheSelection struct {
-	Mode    kvCacheMode
+	Mode     kvCacheMode
 	Assigned string
-	Warning string
+	Warning  string
 }
 
 // LoadModel will load a model from disk. The model must be in the GGML format.
@@ -227,7 +235,7 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 		fa = false
 	}
 
-	mode := resolveKVCacheMode(opts)
+	modes := resolveKVCacheModes(opts)
 	backendMode := resolveKVCacheBackendMode(opts)
 
 	if tok == nil {
@@ -240,9 +248,11 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			}
 		}
 
-		selection := selectLegacyKVCacheType(mode, flashAttention, f.SupportsKVCacheType, f.KVCacheTypeIsQuantized)
+		selection := selectLegacyKVCacheType(modes.Unified, flashAttention, f.SupportsKVCacheType, f.KVCacheTypeIsQuantized)
 		if selection.Assigned != "" {
 			loadRequest.KvCacheType = selection.Assigned
+			loadRequest.KvCacheTypeK = modes.K.Effective
+			loadRequest.KvCacheTypeV = modes.V.Effective
 			loadRequest.KvCacheBackend = backendMode.Effective
 			logAcceptedKVCacheType(selection.Mode)
 		} else if selection.Warning != "" {
@@ -255,16 +265,18 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			slog.Info("enabling flash attention")
 			loadRequest.FlashAttention = ml.FlashAttentionEnabled
 
-			selection := selectEngineKVCacheType(mode, true, f.SupportsKVCacheType)
+			selection := selectEngineKVCacheType(modes.Unified, true, f.SupportsKVCacheType)
 			if selection.Assigned != "" {
 				loadRequest.KvCacheType = selection.Assigned
+				loadRequest.KvCacheTypeK = modes.K.Effective
+				loadRequest.KvCacheTypeV = modes.V.Effective
 				loadRequest.KvCacheBackend = backendMode.Effective
 				logAcceptedKVCacheType(selection.Mode)
 			} else if selection.Warning != "" {
 				logRejectedKVCacheType(selection)
 			}
 		} else {
-			selection := selectEngineKVCacheType(mode, false, f.SupportsKVCacheType)
+			selection := selectEngineKVCacheType(modes.Unified, false, f.SupportsKVCacheType)
 			if selection.Warning != "" {
 				logRejectedKVCacheType(selection)
 			}
@@ -341,11 +353,53 @@ func normalizeKVCacheType(cacheType string) string {
 }
 
 func resolveKVCacheMode(opts api.Options) kvCacheMode {
-	if opts.KVCacheType != "" {
-		return newKVCacheMode(opts.KVCacheType)
+	return resolveKVCacheModes(opts).Unified
+}
+
+func resolveKVCacheModes(opts api.Options) kvCacheModes {
+	unified := ""
+	switch {
+	case opts.KVCacheType != "":
+		unified = opts.KVCacheType
+	default:
+		unified = envconfig.KvCacheType()
 	}
 
-	return newKVCacheMode(envconfig.KvCacheType())
+	kRequested := unified
+	if opts.Runner.KVCacheTypeK != "" {
+		kRequested = opts.Runner.KVCacheTypeK
+	} else if envconfig.KvCacheTypeK() != "" {
+		kRequested = envconfig.KvCacheTypeK()
+	}
+
+	vRequested := unified
+	if opts.Runner.KVCacheTypeV != "" {
+		vRequested = opts.Runner.KVCacheTypeV
+	} else if envconfig.KvCacheTypeV() != "" {
+		vRequested = envconfig.KvCacheTypeV()
+	}
+
+	kMode := newKVCacheMode(kRequested)
+	vMode := newKVCacheMode(vRequested)
+	unifiedMode := newKVCacheMode(unified)
+
+	if kMode.Effective == "" {
+		kMode = newKVCacheMode("f16")
+	}
+	if vMode.Effective == "" {
+		vMode = newKVCacheMode("f16")
+	}
+	if unifiedMode.Effective == "" {
+		unifiedMode = newKVCacheMode("f16")
+	}
+
+	return kvCacheModes{
+		Unified:    unifiedMode,
+		K:          kMode,
+		V:          vMode,
+		Symmetric:  kMode.Effective == vMode.Effective,
+		Asymmetric: kMode.Effective != vMode.Effective,
+	}
 }
 
 func normalizeKVCacheBackend(backend string) string {
@@ -595,6 +649,8 @@ type LoadRequest struct {
 	FlashAttention ml.FlashAttentionType
 	KvSize         int
 	KvCacheType    string
+	KvCacheTypeK   string
+	KvCacheTypeV   string
 	KvCacheBackend string
 	NumThreads     int
 	GPULayers      ml.GPULayersList
@@ -1631,22 +1687,37 @@ type Logprob struct {
 }
 
 type CompletionResponse struct {
-	Content            string        `json:"content"`
-	DoneReason         DoneReason    `json:"done_reason"`
-	Done               bool          `json:"done"`
-	PromptEvalCount    int           `json:"prompt_eval_count"`
-	PromptEvalDuration time.Duration `json:"prompt_eval_duration"`
-	EvalCount          int           `json:"eval_count"`
-	EvalDuration       time.Duration `json:"eval_duration"`
-	KVCacheRequested   string        `json:"kv_cache_requested,omitempty"`
-	KVCacheEffective   string        `json:"kv_cache_effective,omitempty"`
-	ResolvedKVCacheType string       `json:"resolved_kv_cache_type,omitempty"`
-	KVAlgoResolved     string        `json:"kv_algo_resolved,omitempty"`
-	KVCacheBackend     string        `json:"kv_cache_backend,omitempty"`
-	KVCachePath        string        `json:"kv_cache_path,omitempty"`
-	KVCacheBytes       uint64        `json:"kv_cache_bytes,omitempty"`
-	WeightsBytes       uint64        `json:"weights_bytes,omitempty"`
-	TotalVRAMBytes     uint64        `json:"total_vram_bytes,omitempty"`
+	Content                   string        `json:"content"`
+	DoneReason                DoneReason    `json:"done_reason"`
+	Done                      bool          `json:"done"`
+	PromptEvalCount           int           `json:"prompt_eval_count"`
+	PromptEvalDuration        time.Duration `json:"prompt_eval_duration"`
+	EvalCount                 int           `json:"eval_count"`
+	EvalDuration              time.Duration `json:"eval_duration"`
+	KVCacheRequested          string        `json:"kv_cache_requested,omitempty"`
+	KVCacheEffective          string        `json:"kv_cache_effective,omitempty"`
+	ResolvedKVCacheType       string        `json:"resolved_kv_cache_type,omitempty"`
+	ResolvedKVCacheTypeK      string        `json:"resolved_kv_cache_type_k,omitempty"`
+	ResolvedKVCacheTypeV      string        `json:"resolved_kv_cache_type_v,omitempty"`
+	KVAlgoResolved            string        `json:"kv_algo_resolved,omitempty"`
+	KVAlgoResolvedK           string        `json:"kv_algo_resolved_k,omitempty"`
+	KVAlgoResolvedV           string        `json:"kv_algo_resolved_v,omitempty"`
+	KVCacheBackend            string        `json:"kv_cache_backend,omitempty"`
+	KVCachePath               string        `json:"kv_cache_path,omitempty"`
+	KVCachePathK              string        `json:"kv_cache_path_k,omitempty"`
+	KVCachePathV              string        `json:"kv_cache_path_v,omitempty"`
+	KVSymmetric               bool          `json:"kv_symmetric,omitempty"`
+	KVAsymmetric              bool          `json:"kv_asymmetric,omitempty"`
+	FallbackReason            string        `json:"fallback_reason,omitempty"`
+	TurboQuantPathKind        string        `json:"turboquant_path_kind,omitempty"`
+	NativeTurboQuantActive    bool          `json:"native_turboquant_active,omitempty"`
+	ReferenceTurboQuantActive bool          `json:"reference_turboquant_active,omitempty"`
+	FAEnabled                 bool          `json:"fa_enabled,omitempty"`
+	VTurboSupported           bool          `json:"v_turbo_supported,omitempty"`
+	TQBlockSize               int           `json:"tq_block_size,omitempty"`
+	KVCacheBytes              uint64        `json:"kv_cache_bytes,omitempty"`
+	WeightsBytes              uint64        `json:"weights_bytes,omitempty"`
+	TotalVRAMBytes            uint64        `json:"total_vram_bytes,omitempty"`
 
 	// Logprobs contains log probability information if requested
 	Logprobs []Logprob `json:"logprobs,omitempty"`

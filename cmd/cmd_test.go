@@ -372,6 +372,34 @@ func TestNormalizeTurboQuantFlag(t *testing.T) {
 	}
 }
 
+func TestNormalizeCacheTypeFlagValue(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{in: "", want: "", ok: true},
+		{in: "q8_0", want: "q8_0", ok: true},
+		{in: "tq35", want: "tq35", ok: true},
+		{in: "off", want: "f16", ok: true},
+		{in: "bad", ok: false},
+	}
+
+	for _, tt := range tests {
+		got, err := normalizeCacheTypeFlagValue("--cache-type-k", tt.in)
+		if tt.ok {
+			if err != nil {
+				t.Fatalf("normalizeCacheTypeFlagValue(%q) returned error: %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Fatalf("normalizeCacheTypeFlagValue(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		} else if err == nil {
+			t.Fatalf("normalizeCacheTypeFlagValue(%q) = nil error, want error", tt.in)
+		}
+	}
+}
+
 func TestLoadOrUnloadModelIncludesKVCacheTypeOption(t *testing.T) {
 	var got api.GenerateRequest
 
@@ -448,6 +476,53 @@ func TestRunHandlerTurboQuantAddsGenerateOption(t *testing.T) {
 
 	if got.Options["kv_cache_type"] != "tq25" {
 		t.Fatalf("generate request kv_cache_type = %v, want tq25", got.Options["kv_cache_type"])
+	}
+}
+
+func TestRunHandlerSplitKVAddsGenerateOptions(t *testing.T) {
+	var got api.GenerateRequest
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityCompletion},
+			})
+		case r.URL.Path == "/api/generate" && r.Method == http.MethodPost:
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.GenerateResponse{Done: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	addRunHandlerFlags(cmd)
+	if err := cmd.Flags().Set("cache-type-k", "q8_0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("cache-type-v", "tq35"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RunHandler(cmd, []string{"test-model", "hello"}); err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+
+	if got.Options["kv_cache_type_k"] != "q8_0" {
+		t.Fatalf("generate request kv_cache_type_k = %v, want q8_0", got.Options["kv_cache_type_k"])
+	}
+	if got.Options["kv_cache_type_v"] != "tq35" {
+		t.Fatalf("generate request kv_cache_type_v = %v, want tq35", got.Options["kv_cache_type_v"])
 	}
 }
 

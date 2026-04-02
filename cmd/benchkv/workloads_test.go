@@ -25,9 +25,9 @@ func TestMakeWorkloadSpecPrefillHeavy(t *testing.T) {
 
 func TestBuildImpactCells(t *testing.T) {
 	cfg := config{
-		Profile:  "impact",
-		Hosts:    []hostTarget{{Label: "baseline"}},
-		KVModes:  []string{"f16"},
+		Profile: "impact",
+		Hosts:   []hostTarget{{Label: "baseline"}},
+		KVModes: []string{"f16"},
 	}
 
 	cells := buildStandardCells(cfg)
@@ -53,9 +53,10 @@ func TestBuildTurboBenefitCellsUsesRequestHostsOnly(t *testing.T) {
 			{Label: "baseline", KVSupportMode: hostKVSupportLegacy},
 			{Label: "turbo", KVSupportMode: hostKVSupportRequest},
 		},
-		KVModes:      []string{"f16", "tq35"},
-		NumCtx:       []int{8192},
-		Concurrency:  []int{1},
+		KVModes:     []string{"f16", "tq35"},
+		Workloads:   []workloadName{workloadPrefillHeavy, workloadDecodeGrowth},
+		NumCtx:      []int{8192},
+		Concurrency: []int{1},
 	}
 
 	cells := buildStandardCells(cfg)

@@ -1,0 +1,67 @@
+ARG CUDA_VERSION=11.8.0
+ARG UBUNTU_VERSION=22.04
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
+
+ARG GO_VERSION=auto
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl wget gnupg pkg-config \
+      build-essential ninja-build binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN CMAKE_VERSION=3.28.6 && \
+    curl -fsSL "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+      | tar --strip-components=1 -xz -C /usr/local
+
+WORKDIR /src
+COPY . .
+
+RUN set -eux; \
+    if [ "${GO_VERSION}" = "auto" ]; then \
+      if grep -qE '^toolchain go' go.mod; then \
+        GO_VER="$(grep -E '^toolchain go' go.mod | awk '{print $2}' | sed 's/^go//')"; \
+      else \
+        GO_VER="$(grep -E '^go [0-9]+\.[0-9]+' go.mod | awk '{print $2}')"; \
+      fi; \
+    else \
+      GO_VER="${GO_VERSION}"; \
+    fi; \
+    curl -fsSL "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz" | tar -xzC /usr/local
+
+ENV PATH=/usr/local/go/bin:$PATH
+
+RUN set -eux; \
+    cmake -S . -B build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_ARCHITECTURES=75; \
+    cmake --build build -j"$(nproc)"; \
+    mkdir -p /out/bin /out/lib/ollama; \
+    PKG="."; \
+    if [ -d "./cmd/ollama" ]; then PKG="./cmd/ollama"; fi; \
+    CGO_ENABLED=1 GOFLAGS="-buildvcs=false" go build -trimpath -o /out/bin/ollama "${PKG}"; \
+    cp -a build/lib/ollama/. /out/lib/ollama/
+
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      pciutils \
+      procps \
+      nvidia-utils-535 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /out/bin/ollama /bin/ollama
+COPY --from=build /out/lib/ollama /lib/ollama
+
+ENV LD_LIBRARY_PATH=/lib/ollama:${LD_LIBRARY_PATH}
+ENV OLLAMA_HOST=0.0.0.0:11434
+
+EXPOSE 11434
+
+ENTRYPOINT ["/bin/ollama"]
+CMD ["serve"]

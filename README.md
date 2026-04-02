@@ -10,6 +10,13 @@ Start building with open models.
 
 ## TurboQuant Fork
 
+Status in this branch:
+
+- `reference_wrapper`: current paper-faithful/reference TurboQuant codec and Go-side wrapper cache path
+- `native_backend`: native-engine migration lane in progress, with explicit runtime reporting and guarded scaffolding
+- asymmetric K/V controls are being added, but symmetric `kv_cache_type` remains the compatibility default
+- experimental paths should not be treated as production-safe memory savings unless the backend owns the packed KV payload directly
+
 This fork adds a paper-style TurboQuant KV-cache path for `tq25` and `tq35`:
 
 - deterministic random orthogonal rotation

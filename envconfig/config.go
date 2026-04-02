@@ -218,6 +218,10 @@ var (
 	DebugLogRequests = Bool("OLLAMA_DEBUG_LOG_REQUESTS")
 	// KvCacheType is the quantization type for the K/V cache.
 	KvCacheType = String("OLLAMA_KV_CACHE_TYPE")
+	// KvCacheTypeK overrides the K-side quantization type for the cache.
+	KvCacheTypeK = String("OLLAMA_KV_CACHE_TYPE_K")
+	// KvCacheTypeV overrides the V-side quantization type for the cache.
+	KvCacheTypeV = String("OLLAMA_KV_CACHE_TYPE_V")
 	// KvCacheBackend requests a backend-specific KV cache path.
 	KvCacheBackend = String("OLLAMA_KV_CACHE_BACKEND")
 	// NoHistory disables readline history.
@@ -310,6 +314,8 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_DEBUG_LOG_REQUESTS": {"OLLAMA_DEBUG_LOG_REQUESTS", DebugLogRequests(), "Log inference request bodies and replay curl commands to a temp directory"},
 		"OLLAMA_FLASH_ATTENTION":    {"OLLAMA_FLASH_ATTENTION", FlashAttention(false), "Enabled flash attention"},
 		"OLLAMA_KV_CACHE_TYPE":      {"OLLAMA_KV_CACHE_TYPE", KvCacheType(), "Quantization type for the K/V cache: f16, q8_0, q4_0, tq25, tq35 (aliases: tq3, tq4; default: f16)"},
+		"OLLAMA_KV_CACHE_TYPE_K":    {"OLLAMA_KV_CACHE_TYPE_K", KvCacheTypeK(), "K-side KV cache override: f16, q8_0, q4_0, tq25, tq35"},
+		"OLLAMA_KV_CACHE_TYPE_V":    {"OLLAMA_KV_CACHE_TYPE_V", KvCacheTypeV(), "V-side KV cache override: f16, q8_0, q4_0, tq25, tq35"},
 		"OLLAMA_KV_CACHE_BACKEND":   {"OLLAMA_KV_CACHE_BACKEND", KvCacheBackend(), "Optional KV cache backend request: cuda"},
 		"OLLAMA_GPU_OVERHEAD":       {"OLLAMA_GPU_OVERHEAD", GpuOverhead(), "Reserve a portion of VRAM per GPU (bytes)"},
 		"OLLAMA_HOST":               {"OLLAMA_HOST", Host(), "IP Address for the ollama server (default 127.0.0.1:11434)"},

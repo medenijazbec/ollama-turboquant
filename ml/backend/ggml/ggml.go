@@ -694,18 +694,24 @@ func (b *Backend) CacheConfig() ml.CacheConfig {
 
 func (b *Backend) TurboQuantSupport() ml.TurboQuantSupport {
 	if b.flashAttention != ml.FlashAttentionEnabled {
-		return ml.TurboQuantSupport{}
+		return ml.TurboQuantSupport{RequiresFlashAttention: true}
 	}
 
 	for _, backend := range b.schedBackends {
 		dev := C.ggml_backend_get_device(backend)
 		switch C.ggml_backend_dev_type(dev) {
 		case C.GGML_BACKEND_DEVICE_TYPE_GPU, C.GGML_BACKEND_DEVICE_TYPE_IGPU:
-			return ml.TurboQuantSupport{}
+			// @Madreag: V-side turbo path is gated on Flash Attention support.
+			// @TheTom: unsupported V turbo paths should fail/fallback clearly rather than degrade ambiguously.
+			return ml.TurboQuantSupport{RequiresFlashAttention: true}
 		}
 	}
 
-	return ml.TurboQuantSupport{CPU: true}
+	return ml.TurboQuantSupport{
+		CPU:                    true,
+		KCPU:                   true,
+		RequiresFlashAttention: true,
+	}
 }
 
 func (b *Backend) SupportsTurboQuantFastPath() bool {

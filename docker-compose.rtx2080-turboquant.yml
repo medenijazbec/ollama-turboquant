@@ -1,0 +1,38 @@
+name: ollama-main-turboquant-rtx2080
+
+services:
+  coding-ollama2080-turboquant:
+    build:
+      context: .
+      dockerfile: Dockerfile.rtx2080-turboquant
+      args:
+        CUDA_VERSION: "11.8.0"
+        UBUNTU_VERSION: "22.04"
+        GO_VERSION: "auto"
+    image: coding-ollama2080-turboquant:cuda11.8-sm75
+    restart: unless-stopped
+    gpus: all
+    ports:
+      - "11440:11434"
+    volumes:
+      - /srv/models/ollama:/models
+      - ../results:/results
+      - ../results_full:/results_full
+      - ./.docker/ollama-config-2080:/root/.ollama
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_MODELS: "/models"
+      OLLAMA_LOAD_TIMEOUT: "120m"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_DEBUG: "DEBUG"
+      OLLAMA_KEEP_ALIVE: "24h"
+      NVIDIA_VISIBLE_DEVICES: "${RTX2080_VISIBLE_DEVICES:-all}"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    shm_size: "16g"
+    ulimits:
+      memlock: -1
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    extra_hosts:
+      - host.docker.internal:host-gateway

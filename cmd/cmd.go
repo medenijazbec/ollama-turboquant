@@ -586,6 +586,22 @@ func normalizeTurboQuantFlag(value string) (string, error) {
 	return normalizeTurboQuantFlagValue("--turboquant", value)
 }
 
+func normalizeCacheTypeFlagValue(flagName, value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", "off", "f16", "q8_0", "q4_0", "tq25", "tq35", "tq3", "tq4":
+		if normalized == "off" {
+			return "f16", nil
+		}
+		if normalized == "tq3" || normalized == "tq4" {
+			return "tq35", nil
+		}
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid value for %s: %q (must be f16, q8_0, q4_0, tq25, tq35, tq3, tq4, or off)", flagName, value)
+	}
+}
+
 func RunHandler(cmd *cobra.Command, args []string) error {
 	interactive := true
 
@@ -643,6 +659,8 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 	}
 
 	var requestedKVCacheType string
+	var requestedKVCacheTypeK string
+	var requestedKVCacheTypeV string
 	var requestedKVCacheBackend string
 	turboquantFlag := cmd.Flags().Lookup("turboquant")
 	turboquantCUDAFlag := cmd.Flags().Lookup("turboquant-cuda")
@@ -662,6 +680,20 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		}
 		if requestedKVCacheType != "" && requestedKVCacheType != "f16" {
 			requestedKVCacheBackend = "cuda"
+		}
+	}
+	cacheTypeKFlag := cmd.Flags().Lookup("cache-type-k")
+	if cacheTypeKFlag != nil && cacheTypeKFlag.Changed {
+		requestedKVCacheTypeK, err = normalizeCacheTypeFlagValue("--cache-type-k", cacheTypeKFlag.Value.String())
+		if err != nil {
+			return err
+		}
+	}
+	cacheTypeVFlag := cmd.Flags().Lookup("cache-type-v")
+	if cacheTypeVFlag != nil && cacheTypeVFlag.Changed {
+		requestedKVCacheTypeV, err = normalizeCacheTypeFlagValue("--cache-type-v", cacheTypeVFlag.Value.String())
+		if err != nil {
+			return err
 		}
 	}
 
@@ -763,6 +795,9 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		} else if requestedKVCacheType != "" {
 			fmt.Fprintf(os.Stderr, "warning: --turboquant is ignored for embedding models\n")
 		}
+		if requestedKVCacheTypeK != "" || requestedKVCacheTypeV != "" {
+			fmt.Fprintf(os.Stderr, "warning: --cache-type-k/--cache-type-v are ignored for embedding models\n")
+		}
 		if opts.Prompt == "" {
 			return errors.New("embedding models require input text. Usage: ollama run " + name + " \"your text here\"")
 		}
@@ -788,6 +823,9 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		} else if requestedKVCacheType != "" {
 			fmt.Fprintf(os.Stderr, "warning: --turboquant is ignored for image generation models\n")
 		}
+		if requestedKVCacheTypeK != "" || requestedKVCacheTypeV != "" {
+			fmt.Fprintf(os.Stderr, "warning: --cache-type-k/--cache-type-v are ignored for image generation models\n")
+		}
 		if opts.Prompt == "" && !interactive {
 			return errors.New("image generation models require a prompt. Usage: ollama run " + name + " \"your prompt here\"")
 		}
@@ -796,6 +834,12 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 
 	if requestedKVCacheType != "" {
 		opts.Options["kv_cache_type"] = requestedKVCacheType
+	}
+	if requestedKVCacheTypeK != "" {
+		opts.Options["kv_cache_type_k"] = requestedKVCacheTypeK
+	}
+	if requestedKVCacheTypeV != "" {
+		opts.Options["kv_cache_type_v"] = requestedKVCacheTypeV
 	}
 	if requestedKVCacheBackend != "" {
 		opts.Options["kv_cache_backend"] = requestedKVCacheBackend
@@ -2213,6 +2257,8 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Lookup("turboquant").NoOptDefVal = "tq35"
 	runCmd.Flags().String("turboquant-cuda", "", "Request CUDA TurboQuant KV cache for this run (tq35, tq25, tq3, tq4, off)")
 	runCmd.Flags().Lookup("turboquant-cuda").NoOptDefVal = "tq35"
+	runCmd.Flags().String("cache-type-k", "", "Override K cache type for this run (f16, q8_0, q4_0, tq25, tq35, off)")
+	runCmd.Flags().String("cache-type-v", "", "Override V cache type for this run (f16, q8_0, q4_0, tq25, tq35, off)")
 	runCmd.Flags().String("think", "", "Enable thinking mode: true/false or high/medium/low for supported models")
 	runCmd.Flags().Lookup("think").NoOptDefVal = "true"
 	runCmd.Flags().Bool("hidethinking", false, "Hide thinking output (if provided)")

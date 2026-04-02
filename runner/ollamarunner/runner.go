@@ -973,18 +973,33 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 				flusher.Flush()
 			} else {
 				if err := json.NewEncoder(w).Encode(&llm.CompletionResponse{
-					Done:               true,
-					DoneReason:         seq.doneReason,
-					PromptEvalCount:    seq.numPromptInputs,
-					PromptEvalDuration: seq.processingDuration,
-					EvalCount:          seq.numPredicted,
-					EvalDuration:       seq.lastUpdatedAt.Sub(seq.startedAt) - seq.samplingDuration,
-					KVCacheRequested:   s.kvCacheInfo.Requested,
-					KVCacheEffective:   s.kvCacheInfo.Effective,
-					ResolvedKVCacheType: s.kvCacheInfo.Effective,
-					KVAlgoResolved:     s.kvCacheInfo.Algorithm,
-					KVCacheBackend:     s.kvCacheInfo.Backend,
-					KVCachePath:        s.kvCacheInfo.Path,
+					Done:                      true,
+					DoneReason:                seq.doneReason,
+					PromptEvalCount:           seq.numPromptInputs,
+					PromptEvalDuration:        seq.processingDuration,
+					EvalCount:                 seq.numPredicted,
+					EvalDuration:              seq.lastUpdatedAt.Sub(seq.startedAt) - seq.samplingDuration,
+					KVCacheRequested:          s.kvCacheInfo.Requested,
+					KVCacheEffective:          s.kvCacheInfo.Effective,
+					ResolvedKVCacheType:       s.kvCacheInfo.Effective,
+					ResolvedKVCacheTypeK:      s.kvCacheInfo.EffectiveK,
+					ResolvedKVCacheTypeV:      s.kvCacheInfo.EffectiveV,
+					KVAlgoResolved:            s.kvCacheInfo.Algorithm,
+					KVAlgoResolvedK:           s.kvCacheInfo.AlgorithmK,
+					KVAlgoResolvedV:           s.kvCacheInfo.AlgorithmV,
+					KVCacheBackend:            s.kvCacheInfo.Backend,
+					KVCachePath:               s.kvCacheInfo.Path,
+					KVCachePathK:              s.kvCacheInfo.PathK,
+					KVCachePathV:              s.kvCacheInfo.PathV,
+					KVSymmetric:               s.kvCacheInfo.Symmetric,
+					KVAsymmetric:              s.kvCacheInfo.Asymmetric,
+					FallbackReason:            s.kvCacheInfo.FallbackReason,
+					TurboQuantPathKind:        s.kvCacheInfo.TurboQuantPathKind,
+					NativeTurboQuantActive:    s.kvCacheInfo.NativeTurboQuantActive,
+					ReferenceTurboQuantActive: s.kvCacheInfo.ReferenceTurboQuantActive,
+					FAEnabled:                 s.lastLoad.FlashAttention == ml.FlashAttentionEnabled,
+					VTurboSupported:           s.kvCacheInfo.VTurboSupported,
+					TQBlockSize:               s.kvCacheInfo.TQBlockSize,
 				}); err != nil {
 					http.Error(w, fmt.Sprintf("failed to encode final response: %v", err), http.StatusInternalServerError)
 				}
@@ -1187,6 +1202,8 @@ func (s *Server) allocModel(
 	loraPath []string,
 	parallel int,
 	kvCacheType string,
+	kvCacheTypeK string,
+	kvCacheTypeV string,
 	kvCacheBackend string,
 	kvSize int,
 	multiUserCache bool,
@@ -1229,7 +1246,7 @@ func (s *Server) allocModel(
 		}
 	}
 
-	s.cache, err = NewInputCache(s.model, kvCacheType, kvCacheBackend, int32(kvSize), parallel, s.batchSize, multiUserCache)
+	s.cache, err = NewInputCache(s.model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend, int32(kvSize), parallel, s.batchSize, multiUserCache)
 	if err != nil {
 		return err
 	}
@@ -1318,7 +1335,7 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 
 		s.batchSize = req.BatchSize
 
-		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KvCacheBackend, req.KvSize, req.MultiUserCache)
+		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KvCacheTypeK, req.KvCacheTypeV, req.KvCacheBackend, req.KvSize, req.MultiUserCache)
 		if err != nil {
 			s.closeModel()
 

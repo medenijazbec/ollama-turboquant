@@ -568,21 +568,36 @@ type DebugInfo struct {
 }
 
 type Metrics struct {
-	TotalDuration      time.Duration `json:"total_duration,omitempty"`
-	LoadDuration       time.Duration `json:"load_duration,omitempty"`
-	PromptEvalCount    int           `json:"prompt_eval_count,omitempty"`
-	PromptEvalDuration time.Duration `json:"prompt_eval_duration,omitempty"`
-	EvalCount          int           `json:"eval_count,omitempty"`
-	EvalDuration       time.Duration `json:"eval_duration,omitempty"`
-	KVCacheRequested   string        `json:"kv_cache_requested,omitempty"`
-	KVCacheEffective   string        `json:"kv_cache_effective,omitempty"`
-	ResolvedKVCacheType string       `json:"resolved_kv_cache_type,omitempty"`
-	KVAlgoResolved     string        `json:"kv_algo_resolved,omitempty"`
-	KVCacheBackend     string        `json:"kv_cache_backend,omitempty"`
-	KVCachePath        string        `json:"kv_cache_path,omitempty"`
-	KVCacheBytes       uint64        `json:"kv_cache_bytes,omitempty"`
-	WeightsBytes       uint64        `json:"weights_bytes,omitempty"`
-	TotalVRAMBytes     uint64        `json:"total_vram_bytes,omitempty"`
+	TotalDuration             time.Duration `json:"total_duration,omitempty"`
+	LoadDuration              time.Duration `json:"load_duration,omitempty"`
+	PromptEvalCount           int           `json:"prompt_eval_count,omitempty"`
+	PromptEvalDuration        time.Duration `json:"prompt_eval_duration,omitempty"`
+	EvalCount                 int           `json:"eval_count,omitempty"`
+	EvalDuration              time.Duration `json:"eval_duration,omitempty"`
+	KVCacheRequested          string        `json:"kv_cache_requested,omitempty"`
+	KVCacheEffective          string        `json:"kv_cache_effective,omitempty"`
+	ResolvedKVCacheType       string        `json:"resolved_kv_cache_type,omitempty"`
+	ResolvedKVCacheTypeK      string        `json:"resolved_kv_cache_type_k,omitempty"`
+	ResolvedKVCacheTypeV      string        `json:"resolved_kv_cache_type_v,omitempty"`
+	KVAlgoResolved            string        `json:"kv_algo_resolved,omitempty"`
+	KVAlgoResolvedK           string        `json:"kv_algo_resolved_k,omitempty"`
+	KVAlgoResolvedV           string        `json:"kv_algo_resolved_v,omitempty"`
+	KVCacheBackend            string        `json:"kv_cache_backend,omitempty"`
+	KVCachePath               string        `json:"kv_cache_path,omitempty"`
+	KVCachePathK              string        `json:"kv_cache_path_k,omitempty"`
+	KVCachePathV              string        `json:"kv_cache_path_v,omitempty"`
+	KVSymmetric               bool          `json:"kv_symmetric,omitempty"`
+	KVAsymmetric              bool          `json:"kv_asymmetric,omitempty"`
+	FallbackReason            string        `json:"fallback_reason,omitempty"`
+	TurboQuantPathKind        string        `json:"turboquant_path_kind,omitempty"`
+	NativeTurboQuantActive    bool          `json:"native_turboquant_active,omitempty"`
+	ReferenceTurboQuantActive bool          `json:"reference_turboquant_active,omitempty"`
+	FAEnabled                 bool          `json:"fa_enabled,omitempty"`
+	VTurboSupported           bool          `json:"v_turbo_supported,omitempty"`
+	KVCacheBytes              uint64        `json:"kv_cache_bytes,omitempty"`
+	WeightsBytes              uint64        `json:"weights_bytes,omitempty"`
+	TotalVRAMBytes            uint64        `json:"total_vram_bytes,omitempty"`
+	TQBlockSize               int           `json:"tq_block_size,omitempty"`
 }
 
 // Options specified in [GenerateRequest].  If you add a new option here, also
@@ -608,13 +623,15 @@ type Options struct {
 
 // Runner options which must be set when the model is loaded into memory
 type Runner struct {
-	NumCtx         int   `json:"num_ctx,omitempty"`
-	NumBatch       int   `json:"num_batch,omitempty"`
-	NumGPU         int   `json:"num_gpu,omitempty"`
-	MainGPU        int   `json:"main_gpu,omitempty"`
-	UseMMap        *bool `json:"use_mmap,omitempty"`
-	NumThread      int   `json:"num_thread,omitempty"`
+	NumCtx         int    `json:"num_ctx,omitempty"`
+	NumBatch       int    `json:"num_batch,omitempty"`
+	NumGPU         int    `json:"num_gpu,omitempty"`
+	MainGPU        int    `json:"main_gpu,omitempty"`
+	UseMMap        *bool  `json:"use_mmap,omitempty"`
+	NumThread      int    `json:"num_thread,omitempty"`
 	KVCacheType    string `json:"kv_cache_type,omitempty"`
+	KVCacheTypeK   string `json:"kv_cache_type_k,omitempty"`
+	KVCacheTypeV   string `json:"kv_cache_type_v,omitempty"`
 	KVCacheBackend string `json:"kv_cache_backend,omitempty"`
 }
 

@@ -1,0 +1,36 @@
+name: ollama-main-turboquant-mixed-spill
+
+services:
+  coding-ollama-mixed-spill:
+    build:
+      context: .
+      dockerfile: Dockerfile.sm52-turboquant
+      args:
+        CUDA_VERSION: "11.8.0"
+        UBUNTU_VERSION: "22.04"
+        GO_VERSION: "auto"
+    image: coding-ollama-mixed-spill:cuda11.8
+    restart: unless-stopped
+    gpus: all
+    ports:
+      - "11441:11434"
+    volumes:
+      - /srv/models/ollama:/models
+      - ../results:/results
+      - ../results_full:/results_full
+      - ./.docker/ollama-config-mixed:/root/.ollama
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_MODELS: "/models"
+      OLLAMA_LOAD_TIMEOUT: "240m"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_DEBUG: "DEBUG"
+      OLLAMA_KEEP_ALIVE: "24h"
+      NVIDIA_VISIBLE_DEVICES: "${MIXED_SPILL_VISIBLE_DEVICES:-all}"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    shm_size: "16g"
+    ulimits:
+      memlock: -1
+      nofile:
+        soft: 1048576
+        hard: 1048576

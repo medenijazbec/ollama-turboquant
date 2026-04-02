@@ -36,7 +36,7 @@ func writeCSV(path string, rows []epochAggregate) error {
 	defer w.Flush()
 
 	header := []string{
-		"host", "host_label", "server_version", "model", "quant", "kv_mode_requested", "kv_mode_resolved", "kv_algo_resolved", "kv_path",
+		"host", "host_label", "server_version", "model", "quant", "kv_mode_requested", "kv_mode_requested_k", "kv_mode_requested_v", "kv_mode_resolved", "kv_mode_resolved_k", "kv_mode_resolved_v", "kv_algo_resolved", "kv_algo_resolved_k", "kv_algo_resolved_v", "kv_path", "kv_path_k", "kv_path_v", "kv_symmetric", "kv_asymmetric", "fallback_reason", "turboquant_path_kind", "native_turboquant_active", "reference_turboquant_active", "fa_enabled", "v_turbo_supported", "tq_block_size",
 		"workload", "num_ctx", "concurrency", "prompt_tokens_target", "prompt_eval_count", "max_tokens", "eval_count",
 		"generated_tokens", "live_kv_tokens_total", "ctx_x_conc", "epoch", "warmup", "prefill_tps", "decode_tps",
 		"ttft_ms_mean", "ttft_ms_p95", "load_ms", "total_ms", "wall_ms", "peak_vram_bytes", "avg_gpu_util", "peak_gpu_util",
@@ -56,9 +56,26 @@ func writeCSV(path string, rows []epochAggregate) error {
 			row.Model,
 			row.Quant,
 			row.KVModeRequested,
+			row.KVModeRequestedK,
+			row.KVModeRequestedV,
 			row.KVModeResolved,
+			row.KVModeResolvedK,
+			row.KVModeResolvedV,
 			row.KVAlgoResolved,
+			row.KVAlgoResolvedK,
+			row.KVAlgoResolvedV,
 			row.KVPath,
+			row.KVPathK,
+			row.KVPathV,
+			fmt.Sprintf("%t", row.KVSymmetric),
+			fmt.Sprintf("%t", row.KVAsymmetric),
+			row.FallbackReason,
+			row.TurboQuantPathKind,
+			fmt.Sprintf("%t", row.NativeTurboQuantActive),
+			fmt.Sprintf("%t", row.ReferenceTurboQuantActive),
+			fmt.Sprintf("%t", row.FAEnabled),
+			fmt.Sprintf("%t", row.VTurboSupported),
+			fmt.Sprintf("%d", row.TQBlockSize),
 			row.Workload,
 			fmt.Sprintf("%d", row.NumCtx),
 			fmt.Sprintf("%d", row.Concurrency),
@@ -337,10 +354,10 @@ type summaryGroup struct {
 }
 
 type summaryKey struct {
-	HostLabel    string
-	Workload     string
-	NumCtx       int
-	Concurrency  int
+	HostLabel   string
+	Workload    string
+	NumCtx      int
+	Concurrency int
 }
 
 type comparisonPair struct {
@@ -361,14 +378,14 @@ func summarizeRows(rows []epochAggregate, include func(epochAggregate) bool) []s
 		concurrency int
 	}
 	type acc struct {
-		count          int
-		prefillTPS     float64
-		decodeTPS      float64
-		ttft           float64
-		totalMS        float64
-		liveKV         float64
-		peakVRAMBytes  *int64
-		peakHostRAM    *int64
+		count         int
+		prefillTPS    float64
+		decodeTPS     float64
+		ttft          float64
+		totalMS       float64
+		liveKV        float64
+		peakVRAMBytes *int64
+		peakHostRAM   *int64
 	}
 
 	m := make(map[key]*acc)

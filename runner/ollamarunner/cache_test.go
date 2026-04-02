@@ -3,8 +3,8 @@ package ollamarunner
 import (
 	"context"
 	"errors"
-	"iter"
 	"fmt"
+	"iter"
 	"reflect"
 	"slices"
 	"testing"
@@ -97,6 +97,52 @@ func TestKVCacheTypeFromStrTurboQuant(t *testing.T) {
 		if got := kvCacheTypeFromStr(in); got != want {
 			t.Fatalf("kvCacheTypeFromStr(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestResolveKVCacheTypes(t *testing.T) {
+	k, v := resolveKVCacheTypes("tq35", "q8_0", "")
+	if k != "q8_0" || v != "tq35" {
+		t.Fatalf("resolveKVCacheTypes override failed: k=%q v=%q", k, v)
+	}
+
+	k, v = resolveKVCacheTypes("", "", "off")
+	if k != "f16" || v != "f16" {
+		t.Fatalf("resolveKVCacheTypes default/off failed: k=%q v=%q", k, v)
+	}
+}
+
+func TestKVCacheRuntimeInfoAsymmetric(t *testing.T) {
+	info := (&InputCache{
+		kvCacheRequested:          "tq35",
+		kvCacheEffective:          "mixed",
+		kvCacheRequestedK:         "q8_0",
+		kvCacheRequestedV:         "tq35",
+		kvCacheEffectiveK:         "q8_0",
+		kvCacheEffectiveV:         "f16",
+		kvAlgoResolved:            "mixed",
+		kvAlgoResolvedK:           "",
+		kvAlgoResolvedV:           "",
+		kvCacheBackend:            "cuda",
+		kvCachePath:               "mixed",
+		kvCachePathK:              "dense-fallback",
+		kvCachePathV:              "dense-fallback",
+		kvSymmetric:               false,
+		kvAsymmetric:              true,
+		fallbackReason:            "requested V turboquant path is not supported",
+		turboQuantPathKind:        "reference_wrapper",
+		referenceTurboQuantActive: true,
+		tqBlockSize:               128,
+	}).RuntimeInfo()
+
+	if !info.Asymmetric || info.Symmetric {
+		t.Fatalf("unexpected symmetry flags: %+v", info)
+	}
+	if info.EffectiveK != "q8_0" || info.EffectiveV != "f16" {
+		t.Fatalf("unexpected effective split: %+v", info)
+	}
+	if info.TQBlockSize != 128 {
+		t.Fatalf("unexpected block size: %+v", info)
 	}
 }
 
@@ -665,18 +711,18 @@ func (b *runnerTestBackend) TurboQuantSupport() ml.TurboQuantSupport {
 
 type runnerTestConfig struct{}
 
-func (runnerTestConfig) Architecture() string              { return "test" }
-func (runnerTestConfig) String(string, ...string) string   { return "" }
-func (runnerTestConfig) Uint(string, ...uint32) uint32     { return 0 }
-func (runnerTestConfig) Float(string, ...float32) float32  { return 0 }
-func (runnerTestConfig) Bool(string, ...bool) bool         { return false }
-func (runnerTestConfig) Strings(string, ...[]string) []string { return nil }
-func (runnerTestConfig) Ints(string, ...[]int32) []int32   { return nil }
+func (runnerTestConfig) Architecture() string                  { return "test" }
+func (runnerTestConfig) String(string, ...string) string       { return "" }
+func (runnerTestConfig) Uint(string, ...uint32) uint32         { return 0 }
+func (runnerTestConfig) Float(string, ...float32) float32      { return 0 }
+func (runnerTestConfig) Bool(string, ...bool) bool             { return false }
+func (runnerTestConfig) Strings(string, ...[]string) []string  { return nil }
+func (runnerTestConfig) Ints(string, ...[]int32) []int32       { return nil }
 func (runnerTestConfig) Floats(string, ...[]float32) []float32 { return nil }
-func (runnerTestConfig) Bools(string, ...[]bool) []bool    { return nil }
-func (runnerTestConfig) Len() int                          { return 0 }
-func (runnerTestConfig) Keys() iter.Seq[string]            { return func(yield func(string) bool) {} }
-func (runnerTestConfig) Value(string) any                  { return nil }
+func (runnerTestConfig) Bools(string, ...[]bool) []bool        { return nil }
+func (runnerTestConfig) Len() int                              { return 0 }
+func (runnerTestConfig) Keys() iter.Seq[string]                { return func(yield func(string) bool) {} }
+func (runnerTestConfig) Value(string) any                      { return nil }
 
 type runnerTestModel struct {
 	model.Base

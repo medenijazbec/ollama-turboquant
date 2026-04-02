@@ -32,14 +32,30 @@ type InputCache struct {
 
 	cache kvcache.Cache
 
-	kvCacheRequested string
-	kvCacheEffective string
-	kvAlgoResolved   string
-	kvCacheBackend   string
-	kvCachePath      string
+	kvCacheRequested          string
+	kvCacheEffective          string
+	kvCacheRequestedK         string
+	kvCacheRequestedV         string
+	kvCacheEffectiveK         string
+	kvCacheEffectiveV         string
+	kvAlgoResolved            string
+	kvAlgoResolvedK           string
+	kvAlgoResolvedV           string
+	kvCacheBackend            string
+	kvCachePath               string
+	kvCachePathK              string
+	kvCachePathV              string
+	kvSymmetric               bool
+	kvAsymmetric              bool
+	fallbackReason            string
+	turboQuantPathKind        string
+	nativeTurboQuantActive    bool
+	referenceTurboQuantActive bool
+	vTurboSupported           bool
+	tqBlockSize               int
 }
 
-func NewInputCache(model model.Model, kvCacheType, kvCacheBackend string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
+func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
 	numCtx := kvSize / int32(numSlots)
 
 	if int(numCtx) < batchSize {
@@ -54,16 +70,65 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheBackend string, kvSize
 
 	cache := model.Config().Cache
 	normalizedKVCacheType := normalizeKVCacheType(kvCacheType)
+	normalizedKVCacheTypeK, normalizedKVCacheTypeV := resolveKVCacheTypes(kvCacheType, kvCacheTypeK, kvCacheTypeV)
+	requestedKVCacheTypeK := normalizedKVCacheTypeK
+	requestedKVCacheTypeV := normalizedKVCacheTypeV
 	normalizedKVCacheBackend := normalizeKVCacheBackend(kvCacheBackend)
 	kvCachePath := "dense-fallback"
 	kvCacheEffective := normalizedKVCacheType
+	kvCacheEffectiveK := normalizedKVCacheTypeK
+	kvCacheEffectiveV := normalizedKVCacheTypeV
 	kvAlgoResolved := ""
+	kvAlgoResolvedK := ""
+	kvAlgoResolvedV := ""
+	kvCachePathK := "dense-fallback"
+	kvCachePathV := "dense-fallback"
+	fallbackReason := ""
+	turboQuantPathKind := "disabled"
+	nativeTurboQuantActive := false
+	referenceTurboQuantActive := false
+	vTurboSupported := normalizedKVCacheTypeV == "" || normalizedKVCacheTypeV == "f16"
+	tqBlockSize := 0
+	if normalizedKVCacheTypeK != normalizedKVCacheTypeV {
+		fallbackReason = "asymmetric K/V cache modes requested but native backend ownership is not enabled in this branch; falling back to f16/f16"
+		kvCacheEffective = "f16"
+		kvCacheEffectiveK = "f16"
+		kvCacheEffectiveV = "f16"
+		normalizedKVCacheType = "f16"
+		normalizedKVCacheTypeK = "f16"
+		normalizedKVCacheTypeV = "f16"
+	}
 	if cache != nil {
-		dtype := kvCacheTypeFromStr(kvCacheType)
+		dtype := kvCacheTypeFromStr(normalizedKVCacheType)
+		dtypeK := kvCacheTypeFromStr(normalizedKVCacheTypeK)
+		dtypeV := kvCacheTypeFromStr(normalizedKVCacheTypeV)
+		kvCachePathK = resolveKVCachePath(model.Backend(), dtypeK, normalizedKVCacheBackend)
+		kvCachePathV = resolveKVCachePath(model.Backend(), dtypeV, normalizedKVCacheBackend)
+		// @TheTom: asymmetric K/V support is required; symmetric-only control is too limiting.
+		// @primoco: recall tests showed strong q8_0-K + tq4_0-V behavior in one benchmark regime.
+		// @sjoerdmaessen: some asymmetric pairings can still corrupt outputs, so keep guardrails and explicit rollout rules.
+		if isTurboQuantKVType(normalizedKVCacheTypeV) && kvCachePathV == "dense-fallback" {
+			fallbackReason = "requested V turboquant path is not supported by the active backend; falling back to f16 on V"
+			normalizedKVCacheTypeV = "f16"
+			kvCacheEffectiveV = "f16"
+			dtypeV = ml.DTypeF16
+			kvCachePathV = "dense-fallback"
+			vTurboSupported = false
+		}
+		if isTurboQuantKVType(normalizedKVCacheTypeK) && kvCachePathK != "dense-fallback" {
+			kvAlgoResolvedK = turboquant.AlgorithmPaper
+		}
+		if isTurboQuantKVType(normalizedKVCacheTypeV) && kvCachePathV != "dense-fallback" {
+			kvAlgoResolvedV = turboquant.AlgorithmPaper
+			vTurboSupported = true
+		}
 		if preset, ok := kvcachePreset(dtype); ok {
 			cache = kvcache.WrapWithTurboQuant(cache, preset, normalizedKVCacheBackend)
 			kvCachePath = resolveKVCachePath(model.Backend(), dtype, normalizedKVCacheBackend)
 			kvAlgoResolved = turboquant.AlgorithmPaper
+			turboQuantPathKind = "reference_wrapper"
+			referenceTurboQuantActive = true
+			tqBlockSize = turboquant.NativeGroupSize
 			slog.Info("using turboquant kv cache", "requested", kvCacheType, "backend", normalizedKVCacheBackend, "preset", preset.Name, "path", kvCachePath)
 			if kvCachePath == "dense-fallback" {
 				slog.Warn("turboquant kv cache requested but backend cannot use requested fast path; falling back to dense attention path",
@@ -71,19 +136,69 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheBackend string, kvSize
 			}
 		}
 		cache.Init(model.Backend(), dtype, numSlots, int(numCtx), batchSize)
+		if kvCachePathK == "" {
+			kvCachePathK = kvCachePath
+		}
+		if kvCachePathV == "" {
+			kvCachePathV = kvCachePath
+		}
+	}
+
+	if kvCacheEffectiveK == "" {
+		kvCacheEffectiveK = "f16"
+	}
+	if kvCacheEffectiveV == "" {
+		kvCacheEffectiveV = "f16"
+	}
+	if kvCacheEffective == "" {
+		if kvCacheEffectiveK == kvCacheEffectiveV {
+			kvCacheEffective = kvCacheEffectiveK
+		} else {
+			kvCacheEffective = "mixed"
+		}
+	}
+	if kvAlgoResolved == "" {
+		if kvAlgoResolvedK == kvAlgoResolvedV {
+			kvAlgoResolved = kvAlgoResolvedK
+		} else if kvAlgoResolvedK != "" || kvAlgoResolvedV != "" {
+			kvAlgoResolved = "mixed"
+		}
+	}
+	if kvCachePath == "" {
+		if kvCachePathK == kvCachePathV {
+			kvCachePath = kvCachePathK
+		} else {
+			kvCachePath = "mixed"
+		}
 	}
 
 	return &InputCache{
-		numCtx:         numCtx,
-		enabled:        cache != nil,
-		slots:          slots,
-		multiUserCache: multiUserCache,
-		cache:          cache,
-		kvCacheRequested: normalizedKVCacheType,
-		kvCacheEffective: kvCacheEffective,
-		kvAlgoResolved:   kvAlgoResolved,
-		kvCacheBackend:   normalizedKVCacheBackend,
-		kvCachePath:      kvCachePath,
+		numCtx:                    numCtx,
+		enabled:                   cache != nil,
+		slots:                     slots,
+		multiUserCache:            multiUserCache,
+		cache:                     cache,
+		kvCacheRequested:          normalizedKVCacheType,
+		kvCacheEffective:          kvCacheEffective,
+		kvCacheRequestedK:         requestedKVCacheTypeK,
+		kvCacheRequestedV:         requestedKVCacheTypeV,
+		kvCacheEffectiveK:         kvCacheEffectiveK,
+		kvCacheEffectiveV:         kvCacheEffectiveV,
+		kvAlgoResolved:            kvAlgoResolved,
+		kvAlgoResolvedK:           kvAlgoResolvedK,
+		kvAlgoResolvedV:           kvAlgoResolvedV,
+		kvCacheBackend:            normalizedKVCacheBackend,
+		kvCachePath:               kvCachePath,
+		kvCachePathK:              kvCachePathK,
+		kvCachePathV:              kvCachePathV,
+		kvSymmetric:               kvCacheEffectiveK == kvCacheEffectiveV,
+		kvAsymmetric:              kvCacheEffectiveK != kvCacheEffectiveV,
+		fallbackReason:            fallbackReason,
+		turboQuantPathKind:        turboQuantPathKind,
+		nativeTurboQuantActive:    nativeTurboQuantActive,
+		referenceTurboQuantActive: referenceTurboQuantActive,
+		vTurboSupported:           vTurboSupported,
+		tqBlockSize:               tqBlockSize,
 	}, nil
 }
 
@@ -141,6 +256,8 @@ func kvCacheTypeFromStr(s string) ml.DType {
 
 func normalizeKVCacheType(s string) string {
 	switch strings.ToLower(s) {
+	case "", "off":
+		return "f16"
 	case "tq3", "tq4":
 		return "tq35"
 	default:
@@ -148,12 +265,56 @@ func normalizeKVCacheType(s string) string {
 	}
 }
 
+func resolveKVCacheTypes(unified, k, v string) (string, string) {
+	resolvedUnified := normalizeKVCacheType(unified)
+	resolvedK := resolvedUnified
+	resolvedV := resolvedUnified
+	if strings.TrimSpace(k) != "" {
+		resolvedK = normalizeKVCacheType(k)
+	}
+	if strings.TrimSpace(v) != "" {
+		resolvedV = normalizeKVCacheType(v)
+	}
+	if resolvedK == "" {
+		resolvedK = "f16"
+	}
+	if resolvedV == "" {
+		resolvedV = "f16"
+	}
+	return resolvedK, resolvedV
+}
+
+func isTurboQuantKVType(s string) bool {
+	switch normalizeKVCacheType(s) {
+	case "tq25", "tq35":
+		return true
+	default:
+		return false
+	}
+}
+
 type KVCacheRuntimeInfo struct {
-	Requested string
-	Effective string
-	Algorithm string
-	Backend   string
-	Path      string
+	Requested                 string
+	Effective                 string
+	RequestedK                string
+	RequestedV                string
+	EffectiveK                string
+	EffectiveV                string
+	Algorithm                 string
+	AlgorithmK                string
+	AlgorithmV                string
+	Backend                   string
+	Path                      string
+	PathK                     string
+	PathV                     string
+	Symmetric                 bool
+	Asymmetric                bool
+	FallbackReason            string
+	TurboQuantPathKind        string
+	NativeTurboQuantActive    bool
+	ReferenceTurboQuantActive bool
+	VTurboSupported           bool
+	TQBlockSize               int
 }
 
 func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
@@ -161,11 +322,27 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		return KVCacheRuntimeInfo{}
 	}
 	return KVCacheRuntimeInfo{
-		Requested: c.kvCacheRequested,
-		Effective: c.kvCacheEffective,
-		Algorithm: c.kvAlgoResolved,
-		Backend:   c.kvCacheBackend,
-		Path:      c.kvCachePath,
+		Requested:                 c.kvCacheRequested,
+		Effective:                 c.kvCacheEffective,
+		RequestedK:                c.kvCacheRequestedK,
+		RequestedV:                c.kvCacheRequestedV,
+		EffectiveK:                c.kvCacheEffectiveK,
+		EffectiveV:                c.kvCacheEffectiveV,
+		Algorithm:                 c.kvAlgoResolved,
+		AlgorithmK:                c.kvAlgoResolvedK,
+		AlgorithmV:                c.kvAlgoResolvedV,
+		Backend:                   c.kvCacheBackend,
+		Path:                      c.kvCachePath,
+		PathK:                     c.kvCachePathK,
+		PathV:                     c.kvCachePathV,
+		Symmetric:                 c.kvSymmetric,
+		Asymmetric:                c.kvAsymmetric,
+		FallbackReason:            c.fallbackReason,
+		TurboQuantPathKind:        c.turboQuantPathKind,
+		NativeTurboQuantActive:    c.nativeTurboQuantActive,
+		ReferenceTurboQuantActive: c.referenceTurboQuantActive,
+		VTurboSupported:           c.vTurboSupported,
+		TQBlockSize:               c.tqBlockSize,
 	}
 }
 

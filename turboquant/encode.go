@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 type EncodedVector struct {
@@ -38,12 +39,21 @@ func encodeVector(values []float32, preset Preset, role vectorRole, objective ve
 	codebook, boundaries := scalarCodebook(dim, bits)
 	rotation := BuildRotation(dim, preset.RotationSeed)
 	rotated := ApplyRotation(values, rotation)
+	scale := blockScale(rotated)
 	primaryCodes := make([]uint8, dim)
 	reconRotated := make([]float32, dim)
-	for i, value := range rotated {
-		idx := quantizeScalarByBoundary(value, codebook, boundaries)
-		primaryCodes[i] = idx
-		reconRotated[i] = dequantizeScalar(idx, codebook)
+	if scale == 0 {
+		for i := range primaryCodes {
+			primaryCodes[i] = quantizeScalarByBoundary(0, codebook, boundaries)
+			reconRotated[i] = 0
+		}
+	} else {
+		for i, value := range rotated {
+			normalized := value / scale
+			idx := quantizeScalarByBoundary(normalized, codebook, boundaries)
+			primaryCodes[i] = idx
+			reconRotated[i] = dequantizeScalar(idx, codebook) * scale
+		}
 	}
 
 	qjlRows := 0
@@ -64,7 +74,7 @@ func encodeVector(values []float32, preset Preset, role vectorRole, objective ve
 		CodebookID:     uint16(bits),
 		QJLRows:        uint16(qjlRows),
 		AuxLayoutID:    1,
-		Scale:          1,
+		Scale:          scale,
 		RegularIndices: packBits(primaryCodes, bits),
 		Residual:       encodeResidual(rotated, reconRotated, qjlRows, preset.RotationSeed^0x9e3779b97f4a7c15),
 	}
@@ -75,6 +85,20 @@ func encodeVector(values []float32, preset Preset, role vectorRole, objective ve
 		Dim:     dim,
 		Blocks:  []Block{block},
 	}, nil
+}
+
+func blockScale(values []float32) float32 {
+	if len(values) == 0 {
+		return 0
+	}
+	var sumSquares float64
+	for _, value := range values {
+		sumSquares += float64(value * value)
+	}
+	if sumSquares < 1e-12 {
+		return 0
+	}
+	return float32(math.Sqrt(sumSquares / float64(len(values))))
 }
 
 func (e EncodedVector) MarshalBinary() ([]byte, error) {

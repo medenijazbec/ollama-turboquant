@@ -39,8 +39,13 @@ type BackendCacheConfig interface {
 }
 
 type TurboQuantSupport struct {
-	CPU  bool
-	CUDA bool
+	CPU                    bool
+	CUDA                   bool
+	KCPU                   bool
+	KCUDA                  bool
+	VCPU                   bool
+	VCUDA                  bool
+	RequiresFlashAttention bool
 }
 
 // TurboQuantBackend is implemented by backends that can consume TurboQuant

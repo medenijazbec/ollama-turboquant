@@ -24,7 +24,7 @@ func TestWriteCSV(t *testing.T) {
 	if !strings.Contains(string(data), "host,host_label,server_version,model") {
 		t.Fatal("expected csv header")
 	}
-	if !strings.Contains(string(data), "quant,kv_mode_requested,kv_mode_resolved") {
+	if !strings.Contains(string(data), "quant,kv_mode_requested,kv_mode_requested_k,kv_mode_requested_v,kv_mode_resolved") {
 		t.Fatal("expected extended csv header")
 	}
 	if !strings.Contains(string(data), "kv_algo_resolved") {

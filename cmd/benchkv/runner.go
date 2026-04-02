@@ -96,52 +96,56 @@ func preflightTimeout(runTimeout time.Duration) time.Duration {
 
 func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText string) (workerResult, epochAggregate) {
 	row := workerResult{
-		Host:                cell.Host.BaseURL,
-		HostLabel:           cell.Host.Label,
-		ServerVersion:       preflight.Version,
-		Model:               cfg.Model,
-		Quant:               preflight.ModelQuant,
-		KVModeRequested:     cell.KVMode,
-		KVBackendRequested:  requestedKVBackend(cell.KVMode),
-		KVAlgoResolved:      firstNonEmpty(kvAlgoForRequestedMode(cell.KVMode), "unknown"),
-		KVPath:              "unknown",
-		Workload:            string(cell.Workload.Name),
-		NumCtx:              cell.Workload.NumCtx,
-		PromptTokensTarget:  cell.Workload.PromptTokensTarget,
-		MaxTokens:           cell.Workload.MaxTokens,
-		CtxXConc:            cell.Workload.NumCtx * cell.Workload.Concurrency,
-		Concurrency:         cell.Workload.Concurrency,
-		Epoch:               0,
-		Warmup:              false,
-		RunnerRSSBytes:      -1,
-		GPUResidency:        "unknown",
-		Status:              statusUnsupported,
-		Success:             nil,
-		Error:               errText,
-		RecordedAt:          time.Now().UTC(),
+		Host:               cell.Host.BaseURL,
+		HostLabel:          cell.Host.Label,
+		ServerVersion:      preflight.Version,
+		Model:              cfg.Model,
+		Quant:              preflight.ModelQuant,
+		KVModeRequested:    cell.KVMode,
+		KVModeRequestedK:   cell.KVMode,
+		KVModeRequestedV:   cell.KVMode,
+		KVBackendRequested: requestedKVBackend(cell.KVMode),
+		KVAlgoResolved:     firstNonEmpty(kvAlgoForRequestedMode(cell.KVMode), "unknown"),
+		KVPath:             "unknown",
+		Workload:           string(cell.Workload.Name),
+		NumCtx:             cell.Workload.NumCtx,
+		PromptTokensTarget: cell.Workload.PromptTokensTarget,
+		MaxTokens:          cell.Workload.MaxTokens,
+		CtxXConc:           cell.Workload.NumCtx * cell.Workload.Concurrency,
+		Concurrency:        cell.Workload.Concurrency,
+		Epoch:              0,
+		Warmup:             false,
+		RunnerRSSBytes:     -1,
+		GPUResidency:       "unknown",
+		Status:             statusUnsupported,
+		Success:            nil,
+		Error:              errText,
+		RecordedAt:         time.Now().UTC(),
 	}
 	agg := epochAggregate{
-		Host:                row.Host,
-		HostLabel:           row.HostLabel,
-		ServerVersion:       row.ServerVersion,
-		Model:               row.Model,
-		Quant:               row.Quant,
-		KVModeRequested:     row.KVModeRequested,
-		KVAlgoResolved:      row.KVAlgoResolved,
-		KVBackendRequested:  row.KVBackendRequested,
-		KVPath:              row.KVPath,
-		Workload:            row.Workload,
-		NumCtx:              row.NumCtx,
-		PromptTokensTarget:  row.PromptTokensTarget,
-		MaxTokens:           row.MaxTokens,
-		CtxXConc:            row.CtxXConc,
-		Concurrency:         row.Concurrency,
-		Epoch:               0,
-		Warmup:              false,
-		RunnerRSSBytes:      row.RunnerRSSBytes,
-		Status:              statusUnsupported,
-		Success:             nil,
-		Error:               errText,
+		Host:               row.Host,
+		HostLabel:          row.HostLabel,
+		ServerVersion:      row.ServerVersion,
+		Model:              row.Model,
+		Quant:              row.Quant,
+		KVModeRequested:    row.KVModeRequested,
+		KVModeRequestedK:   row.KVModeRequestedK,
+		KVModeRequestedV:   row.KVModeRequestedV,
+		KVAlgoResolved:     row.KVAlgoResolved,
+		KVBackendRequested: row.KVBackendRequested,
+		KVPath:             row.KVPath,
+		Workload:           row.Workload,
+		NumCtx:             row.NumCtx,
+		PromptTokensTarget: row.PromptTokensTarget,
+		MaxTokens:          row.MaxTokens,
+		CtxXConc:           row.CtxXConc,
+		Concurrency:        row.Concurrency,
+		Epoch:              0,
+		Warmup:             false,
+		RunnerRSSBytes:     row.RunnerRSSBytes,
+		Status:             statusUnsupported,
+		Success:            nil,
+		Error:              errText,
 	}
 	return row, agg
 }
@@ -407,6 +411,8 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 		HostLabel:          cell.Host.Label,
 		Model:              cfg.Model,
 		KVModeRequested:    cell.KVMode,
+		KVModeRequestedK:   cell.KVMode,
+		KVModeRequestedV:   cell.KVMode,
 		KVBackendRequested: requestedKVBackend(cell.KVMode),
 		Workload:           string(cell.Workload.Name),
 		NumCtx:             cell.Workload.NumCtx,
@@ -485,8 +491,23 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 	row.Status = statusOK
 	row.Success = boolPtr(true)
 	row.KVModeResolved = firstNonEmpty(finalMetrics.ResolvedKVCacheType, finalMetrics.KVCacheEffective, row.KVModeRequested)
+	row.KVModeResolvedK = firstNonEmpty(finalMetrics.ResolvedKVCacheTypeK, row.KVModeRequestedK)
+	row.KVModeResolvedV = firstNonEmpty(finalMetrics.ResolvedKVCacheTypeV, row.KVModeRequestedV)
 	row.KVAlgoResolved = firstNonEmpty(finalMetrics.KVAlgoResolved, kvAlgoForRequestedMode(row.KVModeResolved))
+	row.KVAlgoResolvedK = firstNonEmpty(finalMetrics.KVAlgoResolvedK, row.KVAlgoResolved)
+	row.KVAlgoResolvedV = firstNonEmpty(finalMetrics.KVAlgoResolvedV, row.KVAlgoResolved)
 	row.KVPath = firstNonEmpty(finalMetrics.KVCachePath, "unknown")
+	row.KVPathK = firstNonEmpty(finalMetrics.KVCachePathK, row.KVPath)
+	row.KVPathV = firstNonEmpty(finalMetrics.KVCachePathV, row.KVPath)
+	row.KVSymmetric = finalMetrics.KVSymmetric
+	row.KVAsymmetric = finalMetrics.KVAsymmetric
+	row.FallbackReason = finalMetrics.FallbackReason
+	row.TurboQuantPathKind = finalMetrics.TurboQuantPathKind
+	row.NativeTurboQuantActive = finalMetrics.NativeTurboQuantActive
+	row.ReferenceTurboQuantActive = finalMetrics.ReferenceTurboQuantActive
+	row.FAEnabled = finalMetrics.FAEnabled
+	row.VTurboSupported = finalMetrics.VTurboSupported
+	row.TQBlockSize = finalMetrics.TQBlockSize
 	row.PromptEvalCount = finalMetrics.PromptEvalCount
 	row.EvalCount = finalMetrics.EvalCount
 	row.GeneratedTokens = finalMetrics.EvalCount
@@ -536,43 +557,64 @@ func withOptionalTimeout(ctx context.Context, timeout time.Duration) (context.Co
 
 func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 	agg := epochAggregate{
-		Host:                rows[0].Host,
-		HostLabel:           rows[0].HostLabel,
-		ServerVersion:       rows[0].ServerVersion,
-		Model:               rows[0].Model,
-		Quant:               rows[0].Quant,
-		KVModeRequested:     rows[0].KVModeRequested,
-		KVBackendRequested:  rows[0].KVBackendRequested,
-		KVAlgoResolved:      rows[0].KVAlgoResolved,
-		Workload:            rows[0].Workload,
-		NumCtx:              rows[0].NumCtx,
-		PromptTokensTarget:  rows[0].PromptTokensTarget,
-		MaxTokens:           rows[0].MaxTokens,
-		CtxXConc:            rows[0].CtxXConc,
-		Concurrency:         rows[0].Concurrency,
-		Epoch:               rows[0].Epoch,
-		Warmup:              rows[0].Warmup,
-		PeakVRAMBytes:       rows[0].PeakVRAMBytes,
-		AvgGPUUtil:          rows[0].AvgGPUUtil,
-		PeakGPUUtil:         rows[0].PeakGPUUtil,
-		GPUMetricsAvailable: rows[0].GPUMetricsAvailable,
-		HostRAMUsedBytes:    rows[0].HostRAMUsedBytes,
-		PeakHostRAMBytes:    rows[0].PeakHostRAMBytes,
-		HostMetricsAvailable: rows[0].HostMetricsAvailable,
-		FullGPUResidency:    rows[0].FullGPUResidency,
-		GPUOffloadRegression: rows[0].GPUOffloadRegression,
-		ProcessorStateBefore: rows[0].ProcessorStateBefore,
-		ProcessorStateAfter:  rows[0].ProcessorStateAfter,
-		Spilled:             rows[0].Spilled,
-		RunnerRSSBytes:      rows[0].RunnerRSSBytes,
-		Status:              statusOK,
-		Success:             boolPtr(true),
-		WallMS:              float64(wall) / float64(time.Millisecond),
+		Host:                      rows[0].Host,
+		HostLabel:                 rows[0].HostLabel,
+		ServerVersion:             rows[0].ServerVersion,
+		Model:                     rows[0].Model,
+		Quant:                     rows[0].Quant,
+		KVModeRequested:           rows[0].KVModeRequested,
+		KVModeRequestedK:          rows[0].KVModeRequestedK,
+		KVModeRequestedV:          rows[0].KVModeRequestedV,
+		KVBackendRequested:        rows[0].KVBackendRequested,
+		KVAlgoResolved:            rows[0].KVAlgoResolved,
+		KVAlgoResolvedK:           rows[0].KVAlgoResolvedK,
+		KVAlgoResolvedV:           rows[0].KVAlgoResolvedV,
+		KVPathK:                   rows[0].KVPathK,
+		KVPathV:                   rows[0].KVPathV,
+		KVSymmetric:               rows[0].KVSymmetric,
+		KVAsymmetric:              rows[0].KVAsymmetric,
+		FallbackReason:            rows[0].FallbackReason,
+		TurboQuantPathKind:        rows[0].TurboQuantPathKind,
+		NativeTurboQuantActive:    rows[0].NativeTurboQuantActive,
+		ReferenceTurboQuantActive: rows[0].ReferenceTurboQuantActive,
+		FAEnabled:                 rows[0].FAEnabled,
+		VTurboSupported:           rows[0].VTurboSupported,
+		TQBlockSize:               rows[0].TQBlockSize,
+		Workload:                  rows[0].Workload,
+		NumCtx:                    rows[0].NumCtx,
+		PromptTokensTarget:        rows[0].PromptTokensTarget,
+		MaxTokens:                 rows[0].MaxTokens,
+		CtxXConc:                  rows[0].CtxXConc,
+		Concurrency:               rows[0].Concurrency,
+		Epoch:                     rows[0].Epoch,
+		Warmup:                    rows[0].Warmup,
+		PeakVRAMBytes:             rows[0].PeakVRAMBytes,
+		AvgGPUUtil:                rows[0].AvgGPUUtil,
+		PeakGPUUtil:               rows[0].PeakGPUUtil,
+		GPUMetricsAvailable:       rows[0].GPUMetricsAvailable,
+		HostRAMUsedBytes:          rows[0].HostRAMUsedBytes,
+		PeakHostRAMBytes:          rows[0].PeakHostRAMBytes,
+		HostMetricsAvailable:      rows[0].HostMetricsAvailable,
+		FullGPUResidency:          rows[0].FullGPUResidency,
+		GPUOffloadRegression:      rows[0].GPUOffloadRegression,
+		ProcessorStateBefore:      rows[0].ProcessorStateBefore,
+		ProcessorStateAfter:       rows[0].ProcessorStateAfter,
+		Spilled:                   rows[0].Spilled,
+		RunnerRSSBytes:            rows[0].RunnerRSSBytes,
+		Status:                    statusOK,
+		Success:                   boolPtr(true),
+		WallMS:                    float64(wall) / float64(time.Millisecond),
 	}
 	var ttfts []float64
 	var kvResolved []string
+	var kvResolvedK []string
+	var kvResolvedV []string
 	var kvAlgorithms []string
+	var kvAlgorithmsK []string
+	var kvAlgorithmsV []string
 	var kvPaths []string
+	var kvPathsK []string
+	var kvPathsV []string
 	var totalPromptEvalMS float64
 	var totalEvalMS float64
 	for _, row := range rows {
@@ -586,8 +628,14 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		totalEvalMS += row.EvalMS
 		ttfts = append(ttfts, row.TTFTMS)
 		kvResolved = append(kvResolved, row.KVModeResolved)
+		kvResolvedK = append(kvResolvedK, row.KVModeResolvedK)
+		kvResolvedV = append(kvResolvedV, row.KVModeResolvedV)
 		kvAlgorithms = append(kvAlgorithms, row.KVAlgoResolved)
+		kvAlgorithmsK = append(kvAlgorithmsK, row.KVAlgoResolvedK)
+		kvAlgorithmsV = append(kvAlgorithmsV, row.KVAlgoResolvedV)
 		kvPaths = append(kvPaths, row.KVPath)
+		kvPathsK = append(kvPathsK, row.KVPathK)
+		kvPathsV = append(kvPathsV, row.KVPathV)
 		if ptrInt64Value(row.PeakVRAMBytes) > ptrInt64Value(agg.PeakVRAMBytes) {
 			agg.PeakVRAMBytes = row.PeakVRAMBytes
 		}
@@ -621,8 +669,14 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		}
 	}
 	agg.KVModeResolved = uniqueOrMixed(kvResolved)
+	agg.KVModeResolvedK = uniqueOrMixed(kvResolvedK)
+	agg.KVModeResolvedV = uniqueOrMixed(kvResolvedV)
 	agg.KVAlgoResolved = uniqueOrMixed(kvAlgorithms)
+	agg.KVAlgoResolvedK = uniqueOrMixed(kvAlgorithmsK)
+	agg.KVAlgoResolvedV = uniqueOrMixed(kvAlgorithmsV)
 	agg.KVPath = uniqueOrMixed(kvPaths)
+	agg.KVPathK = uniqueOrMixed(kvPathsK)
+	agg.KVPathV = uniqueOrMixed(kvPathsV)
 	if totalPromptEvalMS > 0 {
 		agg.PrefillTPS = (float64(agg.PromptEvalCount) / totalPromptEvalMS) * 1000
 	}

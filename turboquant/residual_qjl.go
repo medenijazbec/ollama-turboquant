@@ -91,7 +91,22 @@ func residualDotCorrection(queryRot []float32, sketch ResidualSketch) float32 {
 		total += sign * gaussianProjectionDot(queryRot, sketch.Seed, row)
 	}
 
-	return float32(qjlUnbiasScale) * sketch.Scale * (total / float32(sketch.SketchDim))
+	correction := float32(qjlUnbiasScale) * sketch.Scale * (total / float32(sketch.SketchDim))
+	queryNorm := float32(math.Sqrt(float64(dotSelf(queryRot))))
+	if queryNorm == 0 {
+		return 0
+	}
+	maxCorrection := sketch.Scale * queryNorm
+	if correction > maxCorrection {
+		return maxCorrection
+	}
+	if correction < -maxCorrection {
+		return -maxCorrection
+	}
+	if sketch.Scale < 1e-6 {
+		return 0
+	}
+	return correction
 }
 
 func gaussianProjectionDot(values []float32, seed uint64, row int) float32 {
@@ -105,4 +120,12 @@ func gaussianProjectionDot(values []float32, seed uint64, row int) float32 {
 func gaussianProjectionEntry(seed uint64, row, col int) float32 {
 	local := splitmix64(seed ^ uint64(row+1)*0x9e3779b97f4a7c15 ^ uint64(col+1)*0xbf58476d1ce4e5b9)
 	return float32(gaussianFloat64(&local))
+}
+
+func dotSelf(values []float32) float32 {
+	var out float32
+	for _, value := range values {
+		out += value * value
+	}
+	return out
 }

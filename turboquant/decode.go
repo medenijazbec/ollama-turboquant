@@ -28,7 +28,7 @@ func ScoreEncodedVector(query []float32, data []byte) (float32, Preset, error) {
 		codebook, _ := scalarCodebook(blockDim, int(block.RegularBits))
 		indices := unpackBits(block.RegularIndices, int(block.RegularBits), blockDim)
 		for i, idx := range indices {
-			total += queryRot[i] * dequantizeScalar(idx, codebook)
+			total += queryRot[i] * (dequantizeScalar(idx, codebook) * block.Scale)
 		}
 		if vectorObjective(block.Objective) == objectiveProduct {
 			total += residualDotCorrection(queryRot, block.Residual)
@@ -52,7 +52,7 @@ func DecodeVector(data []byte) ([]float32, Preset, error) {
 		indices := unpackBits(block.RegularIndices, int(block.RegularBits), blockDim)
 		rotated := make([]float32, blockDim)
 		for i, idx := range indices {
-			rotated[i] = dequantizeScalar(idx, codebook)
+			rotated[i] = dequantizeScalar(idx, codebook) * block.Scale
 		}
 		if vectorObjective(block.Objective) == objectiveProduct {
 			residual := reconstructResidual(blockDim, block.Residual)

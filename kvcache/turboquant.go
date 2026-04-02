@@ -44,6 +44,8 @@ func NewTurboQuantCache(base *Causal, preset turboquant.Preset, requestedBackend
 }
 
 func WrapWithTurboQuant(cache Cache, preset turboquant.Preset, requestedBackend string) Cache {
+	// @Madreag: native K/V paths should live in the engine/backend, not only in wrapper-level cache code.
+	// This wrapper remains the paper/reference lane until the backend owns the packed KV payload directly.
 	switch c := cache.(type) {
 	case *TurboQuantCache:
 		c.requestedBackend = strings.ToLower(strings.TrimSpace(requestedBackend))
@@ -102,12 +104,12 @@ func (c *TurboQuantCache) Put(ctx ml.Context, key, value ml.Tensor) {
 	for i := 0; i < c.meta.curBatchSize; i++ {
 		loc := c.meta.curLocs[i]
 
-		keyBytes, err := c.encodeKeyVectorBytes(kFloats[i*keyStride:(i+1)*keyStride])
+		keyBytes, err := c.encodeKeyVectorBytes(kFloats[i*keyStride : (i+1)*keyStride])
 		if err != nil {
 			panic(err)
 		}
 
-		valueBytes, err := c.encodeValueVectorBytes(vFloats[i*valueStride:(i+1)*valueStride])
+		valueBytes, err := c.encodeValueVectorBytes(vFloats[i*valueStride : (i+1)*valueStride])
 		if err != nil {
 			panic(err)
 		}

@@ -13,6 +13,15 @@ In this branch, `tq25` and `tq35` now resolve to the paper-faithful TurboQuant p
 
 TurboQuant is KV-cache compression only.
 
+## Status
+
+This branch currently exposes:
+
+- `reference_wrapper`: the paper-faithful codec and Go-side wrapper cache path
+- `native_backend`: the native-engine migration lane, introduced incrementally with explicit guards and status reporting
+
+Wrapper-mode runs are still the reference lane. Do not treat them as proof of backend-native KV memory savings until the backend owns the packed KV payload directly.
+
 ## What Is Implemented
 
 This branch includes:
@@ -72,11 +81,34 @@ Set `options.kv_cache_type` on `/api/generate` or `/api/chat`:
 }
 ```
 
+Asymmetric overrides are also supported:
+
+```json
+{
+  "model": "gemma3",
+  "prompt": "Explain TurboQuant.",
+  "options": {
+    "kv_cache_type_k": "q8_0",
+    "kv_cache_type_v": "tq35"
+  }
+}
+```
+
 The runtime reports the resolved mode and algorithm in the final response metrics:
 
 - `resolved_kv_cache_type`
+- `resolved_kv_cache_type_k`
+- `resolved_kv_cache_type_v`
 - `kv_algo_resolved`
+- `kv_algo_resolved_k`
+- `kv_algo_resolved_v`
 - `kv_cache_path`
+- `kv_cache_path_k`
+- `kv_cache_path_v`
+- `kv_symmetric`
+- `kv_asymmetric`
+- `fallback_reason`
+- `turboquant_path_kind`
 
 ### Modelfile default
 
@@ -103,14 +135,17 @@ ollama show --parameters your-model
 
 If neither the request nor the model specifies a KV mode, Ollama falls back to `OLLAMA_KV_CACHE_TYPE`.
 
+`OLLAMA_KV_CACHE_TYPE_K` and `OLLAMA_KV_CACHE_TYPE_V` can override the K or V side independently.
+
 ## Mode Precedence
 
 The effective KV cache mode is resolved in this order:
 
-1. request override: `--turboquant` or `options.kv_cache_type`
-2. model default: `PARAMETER kv_cache_type ...`
-3. environment: `OLLAMA_KV_CACHE_TYPE`
-4. implicit default: `f16`
+1. request side-specific override: `--cache-type-k`, `--cache-type-v`, `options.kv_cache_type_k`, `options.kv_cache_type_v`
+2. request shorthand: `--turboquant` or `options.kv_cache_type`
+3. model default: `PARAMETER kv_cache_type ...`
+4. environment: `OLLAMA_KV_CACHE_TYPE_K`, `OLLAMA_KV_CACHE_TYPE_V`, then `OLLAMA_KV_CACHE_TYPE`
+5. implicit default: `f16/f16`
 
 ## Compatibility And Limitations
 
@@ -118,6 +153,28 @@ The effective KV cache mode is resolved in this order:
 - The legacy llama runner still rejects TurboQuant modes.
 - TurboQuant modes require the new engine path.
 - Quantized KV modes require flash attention support.
+
+## Local Test Lanes
+
+For local Windows development, prefer the curated test lanes instead of `go test ./...`.
+
+Default core lane:
+
+```powershell
+pwsh scripts/test_turboquant_local.ps1
+```
+
+Include platform-gated packages:
+
+```powershell
+pwsh scripts/test_turboquant_local.ps1 -IncludePlatformGated
+```
+
+Lane summary:
+
+- Lane A: `./api`, `./cmd/bench`, `./cmd/benchkv`, `./turboquant`
+- Lane B: `./cmd`, `./runner/ollamarunner`, `./llm`, `./ml/backend/ggml`
+- Lane C: excluded local subsystem lane for `x/mlxrunner/mlx` and `x/imagegen/...`
 - The current fast path is CPU first.
 - Unsupported configurations fall back to the dense KV path.
 - PolarQuant is deferred and not exposed as a public request-time selector in this phase.
