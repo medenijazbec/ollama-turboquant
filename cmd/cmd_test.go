@@ -526,6 +526,66 @@ func TestRunHandlerSplitKVAddsGenerateOptions(t *testing.T) {
 	}
 }
 
+func TestRunHandlerWarnsWhenSplitKVOverridesUnifiedTurboQuant(t *testing.T) {
+	var got api.GenerateRequest
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityCompletion},
+			})
+		case r.URL.Path == "/api/generate" && r.Method == http.MethodPost:
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.GenerateResponse{Done: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	addRunHandlerFlags(cmd)
+	if err := cmd.Flags().Set("turboquant", "tq35"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("cache-type-k", "q8_0"); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStderr := os.Stderr
+	readErr, writeErr, _ := os.Pipe()
+	os.Stderr = writeErr
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	err := RunHandler(cmd, []string{"test-model", "hello"})
+
+	_ = writeErr.Close()
+	var out bytes.Buffer
+	_, _ = io.Copy(&out, readErr)
+
+	if err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+	if !strings.Contains(out.String(), "--turboquant is a symmetric shorthand") {
+		t.Fatalf("expected split override warning, got %q", out.String())
+	}
+	if got.Options["kv_cache_type"] != "tq35" {
+		t.Fatalf("generate request kv_cache_type = %v, want tq35", got.Options["kv_cache_type"])
+	}
+	if got.Options["kv_cache_type_k"] != "q8_0" {
+		t.Fatalf("generate request kv_cache_type_k = %v, want q8_0", got.Options["kv_cache_type_k"])
+	}
+}
+
 func TestRunHandlerTurboQuantIgnoredForEmbeddingModels(t *testing.T) {
 	var embedReq api.EmbedRequest
 

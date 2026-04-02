@@ -237,6 +237,7 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 
 	modes := resolveKVCacheModes(opts)
 	backendMode := resolveKVCacheBackendMode(opts)
+	logKVCacheModeOverrides(modes)
 
 	if tok == nil {
 		flashAttention := ml.FlashAttentionAuto
@@ -400,6 +401,30 @@ func resolveKVCacheModes(opts api.Options) kvCacheModes {
 		Symmetric:  kMode.Effective == vMode.Effective,
 		Asymmetric: kMode.Effective != vMode.Effective,
 	}
+}
+
+func logKVCacheModeOverrides(modes kvCacheModes) {
+	if modes.Unified.Requested == "" {
+		return
+	}
+
+	overrideSides := make([]string, 0, 2)
+	if modes.K.Requested != "" && modes.K.Requested != modes.Unified.Requested {
+		overrideSides = append(overrideSides, "K")
+	}
+	if modes.V.Requested != "" && modes.V.Requested != modes.Unified.Requested {
+		overrideSides = append(overrideSides, "V")
+	}
+	if len(overrideSides) == 0 {
+		return
+	}
+
+	slog.Warn("split kv cache settings override unified kv_cache_type",
+		"unified_requested", modes.Unified.Requested,
+		"resolved_k_type", modes.K.Effective,
+		"resolved_v_type", modes.V.Effective,
+		"override_sides", strings.Join(overrideSides, ","),
+	)
 }
 
 func normalizeKVCacheBackend(backend string) string {
@@ -1696,6 +1721,8 @@ type CompletionResponse struct {
 	EvalDuration              time.Duration `json:"eval_duration"`
 	KVCacheRequested          string        `json:"kv_cache_requested,omitempty"`
 	KVCacheEffective          string        `json:"kv_cache_effective,omitempty"`
+	KVCacheRequestedK         string        `json:"kv_cache_requested_k,omitempty"`
+	KVCacheRequestedV         string        `json:"kv_cache_requested_v,omitempty"`
 	ResolvedKVCacheType       string        `json:"resolved_kv_cache_type,omitempty"`
 	ResolvedKVCacheTypeK      string        `json:"resolved_kv_cache_type_k,omitempty"`
 	ResolvedKVCacheTypeV      string        `json:"resolved_kv_cache_type_v,omitempty"`

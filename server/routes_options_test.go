@@ -128,10 +128,10 @@ func TestModelOptionsNumCtxPriority(t *testing.T) {
 
 func TestModelOptionsKVCacheTypePriority(t *testing.T) {
 	tests := []struct {
-		name          string
-		modelKV       string
-		requestKV     string
-		expectedKV    string
+		name       string
+		modelKV    string
+		requestKV  string
+		expectedKV string
 	}{
 		{
 			name:       "unset by default",
@@ -176,6 +176,64 @@ func TestModelOptionsKVCacheTypePriority(t *testing.T) {
 
 			if opts.KVCacheType != tt.expectedKV {
 				t.Fatalf("KVCacheType = %q, want %q", opts.KVCacheType, tt.expectedKV)
+			}
+		})
+	}
+}
+
+func TestModelOptionsKVCacheSplitPriority(t *testing.T) {
+	s := &Server{}
+
+	tests := []struct {
+		name            string
+		modelOpts       map[string]any
+		requestOpts     map[string]any
+		expectedUnified string
+		expectedK       string
+		expectedV       string
+	}{
+		{
+			name: "request split overrides model unified",
+			modelOpts: map[string]any{
+				"kv_cache_type": "tq35",
+			},
+			requestOpts: map[string]any{
+				"kv_cache_type_k": "q8_0",
+			},
+			expectedUnified: "tq35",
+			expectedK:       "q8_0",
+			expectedV:       "",
+		},
+		{
+			name: "request unified overrides model split only for unspecified side",
+			modelOpts: map[string]any{
+				"kv_cache_type_k": "q8_0",
+				"kv_cache_type_v": "tq25",
+			},
+			requestOpts: map[string]any{
+				"kv_cache_type":   "f16",
+				"kv_cache_type_v": "tq35",
+			},
+			expectedUnified: "f16",
+			expectedK:       "q8_0",
+			expectedV:       "tq35",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := s.modelOptions(&Model{Options: tt.modelOpts}, tt.requestOpts)
+			if err != nil {
+				t.Fatalf("modelOptions failed: %v", err)
+			}
+			if opts.KVCacheType != tt.expectedUnified {
+				t.Fatalf("KVCacheType = %q, want %q", opts.KVCacheType, tt.expectedUnified)
+			}
+			if opts.Runner.KVCacheTypeK != tt.expectedK {
+				t.Fatalf("KVCacheTypeK = %q, want %q", opts.Runner.KVCacheTypeK, tt.expectedK)
+			}
+			if opts.Runner.KVCacheTypeV != tt.expectedV {
+				t.Fatalf("KVCacheTypeV = %q, want %q", opts.Runner.KVCacheTypeV, tt.expectedV)
 			}
 		})
 	}

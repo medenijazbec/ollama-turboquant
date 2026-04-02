@@ -324,6 +324,77 @@ func TestResolveKVCacheMode(t *testing.T) {
 	})
 }
 
+func TestResolveKVCacheModes(t *testing.T) {
+	t.Run("request split overrides unified request", func(t *testing.T) {
+		got := resolveKVCacheModes(api.Options{
+			Runner: api.Runner{
+				KVCacheType:  "tq35",
+				KVCacheTypeK: "q8_0",
+			},
+		})
+
+		if got.Unified.Effective != "tq35" {
+			t.Fatalf("unified effective = %q, want tq35", got.Unified.Effective)
+		}
+		if got.K.Effective != "q8_0" {
+			t.Fatalf("K effective = %q, want q8_0", got.K.Effective)
+		}
+		if got.V.Effective != "tq35" {
+			t.Fatalf("V effective = %q, want tq35", got.V.Effective)
+		}
+		if !got.Asymmetric || got.Symmetric {
+			t.Fatalf("modes = %+v, want asymmetric split resolution", got)
+		}
+	})
+
+	t.Run("env split overrides env unified", func(t *testing.T) {
+		t.Setenv("OLLAMA_KV_CACHE_TYPE", "tq35")
+		t.Setenv("OLLAMA_KV_CACHE_TYPE_K", "q8_0")
+		t.Setenv("OLLAMA_KV_CACHE_TYPE_V", "tq25")
+
+		got := resolveKVCacheModes(api.Options{})
+
+		if got.K.Effective != "q8_0" || got.V.Effective != "tq25" {
+			t.Fatalf("resolveKVCacheModes() = %+v, want q8_0/tq25", got)
+		}
+		if !got.Asymmetric {
+			t.Fatalf("modes = %+v, want asymmetric=true", got)
+		}
+	})
+
+	t.Run("unset defaults to f16 symmetric", func(t *testing.T) {
+		got := resolveKVCacheModes(api.Options{})
+		if got.K.Effective != "f16" || got.V.Effective != "f16" {
+			t.Fatalf("resolveKVCacheModes() = %+v, want f16/f16", got)
+		}
+		if !got.Symmetric || got.Asymmetric {
+			t.Fatalf("modes = %+v, want symmetric=true asymmetric=false", got)
+		}
+	})
+}
+
+func TestLogKVCacheModeOverrides(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(prev)
+
+	logKVCacheModeOverrides(kvCacheModes{
+		Unified: newKVCacheMode("tq35"),
+		K:       newKVCacheMode("q8_0"),
+		V:       newKVCacheMode("tq35"),
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "split kv cache settings override unified kv_cache_type") {
+		t.Fatalf("log output missing override warning: %q", out)
+	}
+	if !strings.Contains(out, "override_sides=K") {
+		t.Fatalf("log output missing override side: %q", out)
+	}
+}
+
 func TestResolveKVCacheBackendMode(t *testing.T) {
 	t.Run("request option overrides env", func(t *testing.T) {
 		t.Setenv("OLLAMA_KV_CACHE_BACKEND", "")
@@ -398,12 +469,12 @@ func TestSelectLegacyKVCacheType(t *testing.T) {
 
 func TestSelectEngineKVCacheType(t *testing.T) {
 	tests := []struct {
-		name                 string
-		mode                 kvCacheMode
+		name                  string
+		mode                  kvCacheMode
 		flashAttentionEnabled bool
-		supported            bool
-		assigned             string
-		warning              string
+		supported             bool
+		assigned              string
+		warning               string
 	}{
 		{
 			name:                  "AliasAccepted",

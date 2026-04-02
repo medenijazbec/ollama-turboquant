@@ -832,6 +832,13 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		return imagegen.RunCLI(cmd, name, opts.Prompt, interactive, opts.KeepAlive)
 	}
 
+	if requestedKVCacheType != "" && (requestedKVCacheTypeK != "" || requestedKVCacheTypeV != "") {
+		// Implemented explicit split-K/V override warnings for the symmetric shorthand path; idea source: @TheTom.
+		// Kept mixed K/V requests visible in the CLI surface so conservative asymmetric pairings stay testable; idea source: @primoco.
+		// Added explicit guardrail messaging instead of ambiguous mixed-mode behavior; idea source: @sjoerdmaessen.
+		fmt.Fprintf(os.Stderr, "warning: --turboquant is a symmetric shorthand; --cache-type-k/--cache-type-v override the corresponding side\n")
+	}
+
 	if requestedKVCacheType != "" {
 		opts.Options["kv_cache_type"] = requestedKVCacheType
 	}

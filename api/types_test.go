@@ -204,6 +204,18 @@ func TestKVCacheTypeParsingFromJSON(t *testing.T) {
 	}
 }
 
+func TestKVCacheSplitTypeParsingFromJSON(t *testing.T) {
+	var oMap map[string]any
+	err := json.Unmarshal([]byte(`{ "kv_cache_type_k": "q8_0", "kv_cache_type_v": "tq35" }`), &oMap)
+	require.NoError(t, err)
+
+	opts := DefaultOptions()
+	err = opts.FromMap(oMap)
+	require.NoError(t, err)
+	assert.Equal(t, "q8_0", opts.Runner.KVCacheTypeK)
+	assert.Equal(t, "tq35", opts.Runner.KVCacheTypeV)
+}
+
 func TestKVCacheBackendParsingFromJSON(t *testing.T) {
 	var oMap map[string]any
 	err := json.Unmarshal([]byte(`{ "kv_cache_backend": "cuda" }`), &oMap)
@@ -281,12 +293,20 @@ func TestUseMmapFormatParams(t *testing.T) {
 
 func TestKVCacheTypeFormatParams(t *testing.T) {
 	resp, err := FormatParams(map[string][]string{
-		"kv_cache_type": {"tq35"},
+		"kv_cache_type":   {"tq35"},
+		"kv_cache_type_k": {"q8_0"},
+		"kv_cache_type_v": {"tq35"},
 	})
 	require.NoError(t, err)
 
 	if got := resp["kv_cache_type"]; got != "tq35" {
 		t.Fatalf("kv_cache_type = %v, want tq35", got)
+	}
+	if got := resp["kv_cache_type_k"]; got != "q8_0" {
+		t.Fatalf("kv_cache_type_k = %v, want q8_0", got)
+	}
+	if got := resp["kv_cache_type_v"]; got != "tq35" {
+		t.Fatalf("kv_cache_type_v = %v, want tq35", got)
 	}
 }
 

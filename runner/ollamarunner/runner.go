@@ -981,6 +981,8 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					EvalDuration:              seq.lastUpdatedAt.Sub(seq.startedAt) - seq.samplingDuration,
 					KVCacheRequested:          s.kvCacheInfo.Requested,
 					KVCacheEffective:          s.kvCacheInfo.Effective,
+					KVCacheRequestedK:         s.kvCacheInfo.RequestedK,
+					KVCacheRequestedV:         s.kvCacheInfo.RequestedV,
 					ResolvedKVCacheType:       s.kvCacheInfo.Effective,
 					ResolvedKVCacheTypeK:      s.kvCacheInfo.EffectiveK,
 					ResolvedKVCacheTypeV:      s.kvCacheInfo.EffectiveV,

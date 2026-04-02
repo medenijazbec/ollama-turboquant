@@ -576,6 +576,8 @@ type Metrics struct {
 	EvalDuration              time.Duration `json:"eval_duration,omitempty"`
 	KVCacheRequested          string        `json:"kv_cache_requested,omitempty"`
 	KVCacheEffective          string        `json:"kv_cache_effective,omitempty"`
+	KVCacheRequestedK         string        `json:"kv_cache_requested_k,omitempty"`
+	KVCacheRequestedV         string        `json:"kv_cache_requested_v,omitempty"`
 	ResolvedKVCacheType       string        `json:"resolved_kv_cache_type,omitempty"`
 	ResolvedKVCacheTypeK      string        `json:"resolved_kv_cache_type_k,omitempty"`
 	ResolvedKVCacheTypeV      string        `json:"resolved_kv_cache_type_v,omitempty"`
