@@ -12,18 +12,39 @@ import (
 )
 
 type turboquantEntry struct {
-	key   []byte
-	value []byte
+	key   payloadRow
+	value payloadRow
+}
+
+type payloadRow struct {
+	LayoutKind    string
+	LayoutVersion int
+	Data          []byte
+	GroupCount    int
+	OriginalHead  int
+	TailPad       int
+}
+
+type TurboQuantLayoutInfo struct {
+	PathKind        string
+	LayoutKind      string
+	LayoutVersion   int
+	GroupCount      int
+	OriginalHeadDim int
+	TailPad         int
+	BlockSize       int
 }
 
 type TurboQuantCache struct {
-	meta             *Causal
-	preset           turboquant.Preset
-	requestedDType   ml.DType
-	storageDType     ml.DType
-	requestedBackend string
-	data             map[int][]turboquantEntry
-	shape            map[int]layerShape
+	meta              *Causal
+	preset            turboquant.Preset
+	requestedDType    ml.DType
+	storageDType      ml.DType
+	requestedBackend  string
+	storageLayoutKind string
+	data              map[int][]turboquantEntry
+	shape             map[int]layerShape
+	layoutInfo        TurboQuantLayoutInfo
 }
 
 type layerShape struct {
@@ -34,12 +55,18 @@ type layerShape struct {
 
 func NewTurboQuantCache(base *Causal, preset turboquant.Preset, requestedBackend string) *TurboQuantCache {
 	return &TurboQuantCache{
-		meta:             base,
-		preset:           preset,
-		storageDType:     ml.DTypeF16,
-		requestedBackend: strings.ToLower(strings.TrimSpace(requestedBackend)),
-		data:             make(map[int][]turboquantEntry),
-		shape:            make(map[int]layerShape),
+		meta:              base,
+		preset:            preset,
+		storageDType:      ml.DTypeF16,
+		requestedBackend:  strings.ToLower(strings.TrimSpace(requestedBackend)),
+		storageLayoutKind: turboquant.ReferenceLayoutKind,
+		data:              make(map[int][]turboquantEntry),
+		shape:             make(map[int]layerShape),
+		layoutInfo: TurboQuantLayoutInfo{
+			PathKind:      "reference_wrapper",
+			LayoutKind:    turboquant.ReferenceLayoutKind,
+			LayoutVersion: turboquant.BlockVersion,
+		},
 	}
 }
 
@@ -66,6 +93,11 @@ func (c *TurboQuantCache) Init(backend ml.Backend, dtype ml.DType, maxSequences,
 	c.data = make(map[int][]turboquantEntry)
 	c.shape = make(map[int]layerShape)
 	c.requestedDType = dtype
+	c.layoutInfo = TurboQuantLayoutInfo{
+		PathKind:      "reference_wrapper",
+		LayoutKind:    c.storageLayoutKind,
+		LayoutVersion: turboquant.BlockVersion,
+	}
 	c.meta.Init(backend, c.storageDType, maxSequences, capacity, maxBatch)
 }
 
@@ -150,16 +182,16 @@ func (c *TurboQuantCache) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor) 
 		}
 
 		entry := layerEntries[cell]
-		if len(entry.key) == 0 || len(entry.value) == 0 {
+		if len(entry.key.Data) == 0 || len(entry.value.Data) == 0 {
 			continue
 		}
 
 		dst := cell - first
-		decodedKey, _, err := turboquant.DecodeVector(entry.key)
+		decodedKey, err := decodePayloadRow(entry.key)
 		if err != nil {
 			panic(err)
 		}
-		decodedValue, _, err := turboquant.DecodeVector(entry.value)
+		decodedValue, err := decodePayloadRow(entry.value)
 		if err != nil {
 			panic(err)
 		}
@@ -215,20 +247,23 @@ func (c *TurboQuantCache) getFastPathTensors(ctx ml.Context, layerEntries []turb
 		}
 
 		entry := layerEntries[cell]
-		if len(entry.key) == 0 || len(entry.value) == 0 {
+		if len(entry.key.Data) == 0 || len(entry.value.Data) == 0 {
+			return nil, nil, false
+		}
+		if entry.key.LayoutKind != turboquant.ReferenceLayoutKind || entry.value.LayoutKind != turboquant.ReferenceLayoutKind {
 			return nil, nil, false
 		}
 
 		if rowBytes == 0 {
-			rowBytes = len(entry.key)
-		} else if len(entry.key) != rowBytes {
+			rowBytes = len(entry.key.Data)
+		} else if len(entry.key.Data) != rowBytes {
 			return nil, nil, false
 		}
 
-		keyBytes = append(keyBytes, entry.key...)
+		keyBytes = append(keyBytes, entry.key.Data...)
 
 		dst := cell - first
-		decodedValue, _, err := turboquant.DecodeVector(entry.value)
+		decodedValue, err := decodePayloadRow(entry.value)
 		if err != nil {
 			return nil, nil, false
 		}
@@ -289,22 +324,82 @@ func (c *TurboQuantCache) ensureLayerStorage(layer int) {
 	}
 }
 
-func (c *TurboQuantCache) encodeKeyVectorBytes(values []float32) ([]byte, error) {
+func (c *TurboQuantCache) encodeKeyVectorBytes(values []float32) (payloadRow, error) {
+	if c.storageLayoutKind == turboquant.NativeLayoutKind128 {
+		encoded, err := turboquant.EncodeNativeGroupedVector(values, c.preset)
+		if err != nil {
+			return payloadRow{}, err
+		}
+		data, err := encoded.MarshalBinary()
+		if err != nil {
+			return payloadRow{}, err
+		}
+		row := payloadRow{
+			LayoutKind:    turboquant.NativeLayoutKind128,
+			LayoutVersion: encoded.Header.LayoutVersion,
+			Data:          data,
+			GroupCount:    encoded.Header.GroupCount,
+			OriginalHead:  encoded.Header.OriginalHeadDim,
+			TailPad:       encoded.Header.TailPad,
+		}
+		c.recordLayoutInfo(row, "native_grouped_scaffold")
+		return row, nil
+	}
+
 	encoded, err := turboquant.EncodeKeyVector(values, c.preset)
 	if err != nil {
-		return nil, err
+		return payloadRow{}, err
 	}
-
-	return encoded.MarshalBinary()
+	data, err := encoded.MarshalBinary()
+	if err != nil {
+		return payloadRow{}, err
+	}
+	row := payloadRow{
+		LayoutKind:    turboquant.ReferenceLayoutKind,
+		LayoutVersion: int(encoded.Version),
+		Data:          data,
+	}
+	c.recordLayoutInfo(row, "reference_wrapper")
+	return row, nil
 }
 
-func (c *TurboQuantCache) encodeValueVectorBytes(values []float32) ([]byte, error) {
-	encoded, err := turboquant.EncodeValueVector(values, c.preset)
-	if err != nil {
-		return nil, err
+func (c *TurboQuantCache) encodeValueVectorBytes(values []float32) (payloadRow, error) {
+	if c.storageLayoutKind == turboquant.NativeLayoutKind128 {
+		encoded, err := turboquant.EncodeNativeGroupedVector(values, c.preset)
+		if err != nil {
+			return payloadRow{}, err
+		}
+		data, err := encoded.MarshalBinary()
+		if err != nil {
+			return payloadRow{}, err
+		}
+		row := payloadRow{
+			LayoutKind:    turboquant.NativeLayoutKind128,
+			LayoutVersion: encoded.Header.LayoutVersion,
+			Data:          data,
+			GroupCount:    encoded.Header.GroupCount,
+			OriginalHead:  encoded.Header.OriginalHeadDim,
+			TailPad:       encoded.Header.TailPad,
+		}
+		c.recordLayoutInfo(row, "native_grouped_scaffold")
+		return row, nil
 	}
 
-	return encoded.MarshalBinary()
+	encoded, err := turboquant.EncodeValueVector(values, c.preset)
+	if err != nil {
+		return payloadRow{}, err
+	}
+	data, err := encoded.MarshalBinary()
+	if err != nil {
+		return payloadRow{}, err
+	}
+	row := payloadRow{
+		LayoutKind:    turboquant.ReferenceLayoutKind,
+		LayoutVersion: int(encoded.Version),
+		Data:          data,
+	}
+	c.recordLayoutInfo(row, "reference_wrapper")
+	return row, nil
 }
 
 func (c *TurboQuantCache) cellsRequiringShift(seq int, endIndex int32) []int {
@@ -346,11 +441,11 @@ func (c *TurboQuantCache) shiftPackedKeys(cells []int, offset int32) error {
 		}
 
 		for _, cell := range cells {
-			if cell < 0 || cell >= len(entries) || len(entries[cell].key) == 0 {
+			if cell < 0 || cell >= len(entries) || len(entries[cell].key.Data) == 0 {
 				continue
 			}
 
-			decodedKey, _, err := turboquant.DecodeVector(entries[cell].key)
+			decodedKey, err := decodePayloadRow(entries[cell].key)
 			if err != nil {
 				return err
 			}
@@ -385,6 +480,54 @@ func (c *TurboQuantCache) sweepReleasedCells() {
 		}
 		c.data[layer] = entries
 	}
+}
+
+func (c *TurboQuantCache) TurboQuantLayoutInfo() TurboQuantLayoutInfo {
+	return c.layoutInfo
+}
+
+func LookupTurboQuantLayoutInfo(cache Cache) (TurboQuantLayoutInfo, bool) {
+	switch c := cache.(type) {
+	case interface{ TurboQuantLayoutInfo() TurboQuantLayoutInfo }:
+		return c.TurboQuantLayoutInfo(), true
+	case *WrapperCache:
+		if len(c.caches) == 0 {
+			return TurboQuantLayoutInfo{}, false
+		}
+		return LookupTurboQuantLayoutInfo(c.caches[c.curType])
+	default:
+		return TurboQuantLayoutInfo{}, false
+	}
+}
+
+func decodePayloadRow(row payloadRow) ([]float32, error) {
+	switch row.LayoutKind {
+	case "", turboquant.ReferenceLayoutKind:
+		decoded, _, err := turboquant.DecodeVector(row.Data)
+		return decoded, err
+	case turboquant.NativeLayoutKind128:
+		var encoded turboquant.NativeGroupedVector
+		if err := encoded.UnmarshalBinary(row.Data); err != nil {
+			return nil, err
+		}
+		return turboquant.DecodeNativeGroupedVector(encoded)
+	default:
+		return nil, fmt.Errorf("unsupported turboquant payload layout %q", row.LayoutKind)
+	}
+}
+
+func (c *TurboQuantCache) recordLayoutInfo(row payloadRow, pathKind string) {
+	c.layoutInfo.PathKind = pathKind
+	c.layoutInfo.LayoutKind = row.LayoutKind
+	c.layoutInfo.LayoutVersion = row.LayoutVersion
+	c.layoutInfo.GroupCount = row.GroupCount
+	c.layoutInfo.OriginalHeadDim = row.OriginalHead
+	c.layoutInfo.TailPad = row.TailPad
+	if row.LayoutKind == turboquant.NativeLayoutKind128 {
+		c.layoutInfo.BlockSize = turboquant.NativeGroupSize
+		return
+	}
+	c.layoutInfo.BlockSize = 0
 }
 
 func permuteValueRows(values []float32, valueDim, numKVHeads, cachedSize int) []float32 {

@@ -1742,6 +1742,11 @@ type CompletionResponse struct {
 	FAEnabled                 bool          `json:"fa_enabled,omitempty"`
 	VTurboSupported           bool          `json:"v_turbo_supported,omitempty"`
 	TQBlockSize               int           `json:"tq_block_size,omitempty"`
+	TQLayoutKind              string        `json:"tq_layout_kind,omitempty"`
+	TQLayoutVersion           int           `json:"tq_layout_version,omitempty"`
+	TQGroupCount              int           `json:"tq_group_count,omitempty"`
+	TQOriginalHeadDim         int           `json:"tq_original_head_dim,omitempty"`
+	TQTailPad                 int           `json:"tq_tail_pad,omitempty"`
 	KVCacheBytes              uint64        `json:"kv_cache_bytes,omitempty"`
 	WeightsBytes              uint64        `json:"weights_bytes,omitempty"`
 	TotalVRAMBytes            uint64        `json:"total_vram_bytes,omitempty"`

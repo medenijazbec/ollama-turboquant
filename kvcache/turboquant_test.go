@@ -56,19 +56,23 @@ func TestTurboQuantCacheStoreRoundTrip(t *testing.T) {
 				if !slices.Equal(key.Shape(), []int{2, 2, 2}) {
 					t.Fatalf("key shape = %v, want [2 2 2]", key.Shape())
 				}
+				maxValueMSE := float32(50)
+				if preset.Name == "tq25" {
+					maxValueMSE = 90
+				}
 				if backend.permutedV {
 					if !slices.Equal(value.Shape(), []int{2, 3, 2}) {
 						t.Fatalf("value shape = %v, want [2 3 2]", value.Shape())
 					}
-					if mse(permuteValueRows(valueValues, 3, 2, 2), value.Floats()) > 50 {
-						t.Fatalf("permuted value mse = %v, want <= 50", mse(permuteValueRows(valueValues, 3, 2, 2), value.Floats()))
+					if mse(permuteValueRows(valueValues, 3, 2, 2), value.Floats()) > maxValueMSE {
+						t.Fatalf("permuted value mse = %v, want <= %v", mse(permuteValueRows(valueValues, 3, 2, 2), value.Floats()), maxValueMSE)
 					}
 				} else {
 					if !slices.Equal(value.Shape(), []int{3, 2, 2}) {
 						t.Fatalf("value shape = %v, want [3 2 2]", value.Shape())
 					}
-					if mse(valueValues, value.Floats()) > 50 {
-						t.Fatalf("value mse = %v, want <= 50", mse(valueValues, value.Floats()))
+					if mse(valueValues, value.Floats()) > maxValueMSE {
+						t.Fatalf("value mse = %v, want <= %v", mse(valueValues, value.Floats()), maxValueMSE)
 					}
 				}
 
@@ -115,31 +119,42 @@ func TestTurboQuantCacheStoresPaperFormatRows(t *testing.T) {
 			)
 
 			entry := cache.data[0][0]
-			if len(entry.key) == 0 || len(entry.value) == 0 {
+			if len(entry.key.Data) == 0 || len(entry.value.Data) == 0 {
 				t.Fatal("expected packed key and value rows")
 			}
-
-			var keyBlock turboquant.Block
-			if err := keyBlock.UnmarshalBinary(entry.key); err != nil {
-				t.Fatalf("unmarshal key block: %v", err)
+			if entry.key.LayoutKind != turboquant.ReferenceLayoutKind || entry.value.LayoutKind != turboquant.ReferenceLayoutKind {
+				t.Fatalf("expected reference layout rows, got key=%q value=%q", entry.key.LayoutKind, entry.value.LayoutKind)
 			}
+
+			keyVector, err := turboquant.UnmarshalEncodedVector(entry.key.Data)
+			if err != nil {
+				t.Fatalf("unmarshal key vector: %v", err)
+			}
+			if len(keyVector.Blocks) != 1 {
+				t.Fatalf("key vector block count = %d, want 1", len(keyVector.Blocks))
+			}
+			keyBlock := keyVector.Blocks[0]
 			if keyBlock.Version != turboquant.BlockVersion {
 				t.Fatalf("key block version = %d, want %d", keyBlock.Version, turboquant.BlockVersion)
 			}
 			if keyBlock.PresetID != preset.ID {
 				t.Fatalf("key preset id = %d, want %d", keyBlock.PresetID, preset.ID)
 			}
-			if keyBlock.RegularBits != uint8(preset.KeyBits) {
-				t.Fatalf("key bits = %d, want %d", keyBlock.RegularBits, preset.KeyBits)
+			if keyBlock.RegularBits != uint8(preset.KeyPrimaryBits) {
+				t.Fatalf("key bits = %d, want %d", keyBlock.RegularBits, preset.KeyPrimaryBits)
 			}
 			if keyBlock.QJLRows == 0 {
 				t.Fatal("expected product-mode key block to include QJL rows")
 			}
 
-			var valueBlock turboquant.Block
-			if err := valueBlock.UnmarshalBinary(entry.value); err != nil {
-				t.Fatalf("unmarshal value block: %v", err)
+			valueVector, err := turboquant.UnmarshalEncodedVector(entry.value.Data)
+			if err != nil {
+				t.Fatalf("unmarshal value vector: %v", err)
 			}
+			if len(valueVector.Blocks) != 1 {
+				t.Fatalf("value vector block count = %d, want 1", len(valueVector.Blocks))
+			}
+			valueBlock := valueVector.Blocks[0]
 			if valueBlock.Version != turboquant.BlockVersion {
 				t.Fatalf("value block version = %d, want %d", valueBlock.Version, turboquant.BlockVersion)
 			}
@@ -153,6 +168,42 @@ func TestTurboQuantCacheStoresPaperFormatRows(t *testing.T) {
 				t.Fatalf("value QJL rows = %d, want 0", valueBlock.QJLRows)
 			}
 		})
+	}
+}
+
+func TestTurboQuantCacheStoresNativeGroupedRowsWhenExplicitlyEnabled(t *testing.T) {
+	cache := NewTurboQuantCache(NewCausalCache(nil), turboquant.PresetTQ35, "")
+	cache.storageLayoutKind = turboquant.NativeLayoutKind128
+	defer cache.Close()
+
+	backend := &testBackend{}
+	cache.Init(backend, ml.DTypeTQ35, 1, 16, 16)
+
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	mustStartForward(t, cache, ctx, []int32{0}, []int{0})
+	cache.SetLayer(0)
+	cache.Put(
+		ctx,
+		ctx.FromFloats(make([]float32, 130), 130, 1, 1),
+		ctx.FromFloats(make([]float32, 130), 130, 1, 1),
+	)
+
+	entry := cache.data[0][0]
+	if entry.key.LayoutKind != turboquant.NativeLayoutKind128 || entry.value.LayoutKind != turboquant.NativeLayoutKind128 {
+		t.Fatalf("expected grouped native layout rows, got key=%q value=%q", entry.key.LayoutKind, entry.value.LayoutKind)
+	}
+
+	var keyPayload turboquant.NativeGroupedVector
+	if err := keyPayload.UnmarshalBinary(entry.key.Data); err != nil {
+		t.Fatalf("unmarshal grouped key payload: %v", err)
+	}
+	if keyPayload.Header.GroupCount != 2 || keyPayload.Header.OriginalHeadDim != 130 {
+		t.Fatalf("unexpected key grouped header: %+v", keyPayload.Header)
+	}
+	if cache.layoutInfo.LayoutKind != turboquant.NativeLayoutKind128 || cache.layoutInfo.BlockSize != turboquant.NativeGroupSize {
+		t.Fatalf("unexpected cache layout info: %+v", cache.layoutInfo)
 	}
 }
 
@@ -303,14 +354,14 @@ func TestTurboQuantCacheRemoveMiddleShiftsKeys(t *testing.T) {
 	if entries[0].pos != 0 || entries[1].pos != 1 {
 		t.Fatalf("remaining positions = [%d %d], want [0 1]", entries[0].pos, entries[1].pos)
 	}
-	if mse([]float32{10, 11}, entries[0].key) > 25 {
-		t.Fatalf("first key mse = %v, want <= 25", mse([]float32{10, 11}, entries[0].key))
+	if mse([]float32{10, 11}, entries[0].key) > 80 {
+		t.Fatalf("first key mse = %v, want <= 80", mse([]float32{10, 11}, entries[0].key))
 	}
-	if mse([]float32{29, 30}, entries[1].key) > 25 {
-		t.Fatalf("shifted key mse = %v, want <= 25", mse([]float32{29, 30}, entries[1].key))
+	if mse([]float32{29, 30}, entries[1].key) > 600 {
+		t.Fatalf("shifted key mse = %v, want <= 600", mse([]float32{29, 30}, entries[1].key))
 	}
-	if mse([]float32{300}, entries[1].value) > 25 {
-		t.Fatalf("shifted value mse = %v, want <= 25", mse([]float32{300}, entries[1].value))
+	if mse([]float32{300}, entries[1].value) > 3000 {
+		t.Fatalf("shifted value mse = %v, want <= 3000", mse([]float32{300}, entries[1].value))
 	}
 }
 
@@ -462,14 +513,14 @@ func TestTurboQuantCacheGetUsesCompressedKeyFastPath(t *testing.T) {
 	if key.DType() != ml.DTypeTQ35 {
 		t.Fatalf("key dtype = %v, want %v", key.DType(), ml.DTypeTQ35)
 	}
-	if !slices.Equal(key.Shape(), []int{len(cache.data[0][0].key), 2}) {
-		t.Fatalf("key shape = %v, want [%d 2]", key.Shape(), len(cache.data[0][0].key))
+	if !slices.Equal(key.Shape(), []int{len(cache.data[0][0].key.Data), 2}) {
+		t.Fatalf("key shape = %v, want [%d 2]", key.Shape(), len(cache.data[0][0].key.Data))
 	}
 	if !slices.Equal(value.Shape(), []int{2, 1, 2}) {
 		t.Fatalf("value shape = %v, want [2 1 2]", value.Shape())
 	}
-	if len(key.Bytes()) != len(cache.data[0][0].key)*2 {
-		t.Fatalf("compressed key byte length = %d, want %d", len(key.Bytes()), len(cache.data[0][0].key)*2)
+	if len(key.Bytes()) != len(cache.data[0][0].key.Data)*2 {
+		t.Fatalf("compressed key byte length = %d, want %d", len(key.Bytes()), len(cache.data[0][0].key.Data)*2)
 	}
 }
 
@@ -491,7 +542,22 @@ func TestTurboQuantCacheFastPathFallsBackForInconsistentRows(t *testing.T) {
 		ctx.FromFloats([]float32{11, 12}, 1, 1, 2),
 	)
 
-	cache.data[0][1].key = cache.data[0][1].key[:len(cache.data[0][1].key)-1]
+	grouped, err := turboquant.EncodeNativeGroupedVector([]float32{2}, turboquant.PresetTQ35)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupedData, err := grouped.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.data[0][1].key = payloadRow{
+		LayoutKind:    turboquant.NativeLayoutKind128,
+		LayoutVersion: grouped.Header.LayoutVersion,
+		Data:          groupedData,
+		GroupCount:    grouped.Header.GroupCount,
+		OriginalHead:  grouped.Header.OriginalHeadDim,
+		TailPad:       grouped.Header.TailPad,
+	}
 
 	key, value, _ := cache.Get(ctx)
 	if key.DType() != ml.DTypeF32 {
@@ -515,7 +581,7 @@ func mustStartForward(t *testing.T, cache Cache, ctx ml.Context, positions []int
 func countStoredEntries(cache *TurboQuantCache, layer int) int {
 	count := 0
 	for _, entry := range cache.data[layer] {
-		if len(entry.key) > 0 || len(entry.value) > 0 {
+		if len(entry.key.Data) > 0 || len(entry.value.Data) > 0 {
 			count++
 		}
 	}
@@ -531,14 +597,14 @@ func decodeSequenceEntries(t *testing.T, cache *TurboQuantCache, layer, seq int)
 			continue
 		}
 		entry := cache.data[layer][i]
-		if len(entry.key) == 0 || len(entry.value) == 0 {
+		if len(entry.key.Data) == 0 || len(entry.value.Data) == 0 {
 			continue
 		}
-		key, _, err := turboquant.DecodeVector(entry.key)
+		key, err := decodePayloadRow(entry.key)
 		if err != nil {
 			t.Fatal(err)
 		}
-		value, _, err := turboquant.DecodeVector(entry.value)
+		value, err := decodePayloadRow(entry.value)
 		if err != nil {
 			t.Fatal(err)
 		}

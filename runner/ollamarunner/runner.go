@@ -1002,6 +1002,11 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					FAEnabled:                 s.lastLoad.FlashAttention == ml.FlashAttentionEnabled,
 					VTurboSupported:           s.kvCacheInfo.VTurboSupported,
 					TQBlockSize:               s.kvCacheInfo.TQBlockSize,
+					TQLayoutKind:              s.kvCacheInfo.TQLayoutKind,
+					TQLayoutVersion:           s.kvCacheInfo.TQLayoutVersion,
+					TQGroupCount:              s.kvCacheInfo.TQGroupCount,
+					TQOriginalHeadDim:         s.kvCacheInfo.TQOriginalHeadDim,
+					TQTailPad:                 s.kvCacheInfo.TQTailPad,
 				}); err != nil {
 					http.Error(w, fmt.Sprintf("failed to encode final response: %v", err), http.StatusInternalServerError)
 				}

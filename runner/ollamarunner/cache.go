@@ -53,6 +53,11 @@ type InputCache struct {
 	referenceTurboQuantActive bool
 	vTurboSupported           bool
 	tqBlockSize               int
+	tqLayoutKind              string
+	tqLayoutVersion           int
+	tqGroupCount              int
+	tqOriginalHeadDim         int
+	tqTailPad                 int
 }
 
 func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
@@ -89,6 +94,11 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	referenceTurboQuantActive := false
 	vTurboSupported := normalizedKVCacheTypeV == "" || normalizedKVCacheTypeV == "f16"
 	tqBlockSize := 0
+	tqLayoutKind := ""
+	tqLayoutVersion := 0
+	tqGroupCount := 0
+	tqOriginalHeadDim := 0
+	tqTailPad := 0
 	if normalizedKVCacheTypeK != normalizedKVCacheTypeV {
 		fallbackReason = "asymmetric K/V cache modes requested but native backend ownership is not enabled in this branch; falling back to f16/f16"
 		kvCacheEffective = "f16"
@@ -104,9 +114,9 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		dtypeV := kvCacheTypeFromStr(normalizedKVCacheTypeV)
 		kvCachePathK = resolveKVCachePath(model.Backend(), dtypeK, normalizedKVCacheBackend)
 		kvCachePathV = resolveKVCachePath(model.Backend(), dtypeV, normalizedKVCacheBackend)
-		// @TheTom: asymmetric K/V support is required; symmetric-only control is too limiting.
-		// @primoco: recall tests showed strong q8_0-K + tq4_0-V behavior in one benchmark regime.
-		// @sjoerdmaessen: some asymmetric pairings can still corrupt outputs, so keep guardrails and explicit rollout rules.
+		// Implemented explicit asymmetric K/V resolution at cache setup instead of treating everything as symmetric; idea source: @TheTom.
+		// Preserved visible mixed K/V request handling so conservative asymmetric pairings remain measurable; idea source: @primoco.
+		// Added guarded fallback reporting for risky asymmetric pairings instead of silent degradation; idea source: @sjoerdmaessen.
 		if isTurboQuantKVType(normalizedKVCacheTypeV) && kvCachePathV == "dense-fallback" {
 			fallbackReason = "requested V turboquant path is not supported by the active backend; falling back to f16 on V"
 			normalizedKVCacheTypeV = "f16"
@@ -128,7 +138,6 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 			kvAlgoResolved = turboquant.AlgorithmPaper
 			turboQuantPathKind = "reference_wrapper"
 			referenceTurboQuantActive = true
-			tqBlockSize = turboquant.NativeGroupSize
 			slog.Info("using turboquant kv cache", "requested", kvCacheType, "backend", normalizedKVCacheBackend, "preset", preset.Name, "path", kvCachePath)
 			if kvCachePath == "dense-fallback" {
 				slog.Warn("turboquant kv cache requested but backend cannot use requested fast path; falling back to dense attention path",
@@ -136,6 +145,17 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 			}
 		}
 		cache.Init(model.Backend(), dtype, numSlots, int(numCtx), batchSize)
+		if info, ok := kvcache.LookupTurboQuantLayoutInfo(cache); ok {
+			if info.PathKind != "" {
+				turboQuantPathKind = info.PathKind
+			}
+			tqLayoutKind = info.LayoutKind
+			tqLayoutVersion = info.LayoutVersion
+			tqGroupCount = info.GroupCount
+			tqOriginalHeadDim = info.OriginalHeadDim
+			tqTailPad = info.TailPad
+			tqBlockSize = info.BlockSize
+		}
 		if kvCachePathK == "" {
 			kvCachePathK = kvCachePath
 		}
@@ -199,6 +219,11 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		referenceTurboQuantActive: referenceTurboQuantActive,
 		vTurboSupported:           vTurboSupported,
 		tqBlockSize:               tqBlockSize,
+		tqLayoutKind:              tqLayoutKind,
+		tqLayoutVersion:           tqLayoutVersion,
+		tqGroupCount:              tqGroupCount,
+		tqOriginalHeadDim:         tqOriginalHeadDim,
+		tqTailPad:                 tqTailPad,
 	}, nil
 }
 
@@ -315,6 +340,11 @@ type KVCacheRuntimeInfo struct {
 	ReferenceTurboQuantActive bool
 	VTurboSupported           bool
 	TQBlockSize               int
+	TQLayoutKind              string
+	TQLayoutVersion           int
+	TQGroupCount              int
+	TQOriginalHeadDim         int
+	TQTailPad                 int
 }
 
 func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
@@ -343,6 +373,11 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		ReferenceTurboQuantActive: c.referenceTurboQuantActive,
 		VTurboSupported:           c.vTurboSupported,
 		TQBlockSize:               c.tqBlockSize,
+		TQLayoutKind:              c.tqLayoutKind,
+		TQLayoutVersion:           c.tqLayoutVersion,
+		TQGroupCount:              c.tqGroupCount,
+		TQOriginalHeadDim:         c.tqOriginalHeadDim,
+		TQTailPad:                 c.tqTailPad,
 	}
 }
 

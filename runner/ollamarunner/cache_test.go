@@ -16,6 +16,7 @@ import (
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model"
 	"github.com/ollama/ollama/model/input"
+	"github.com/ollama/ollama/turboquant"
 )
 
 func TestCountCommon(t *testing.T) {
@@ -132,7 +133,9 @@ func TestKVCacheRuntimeInfoAsymmetric(t *testing.T) {
 		fallbackReason:            "requested V turboquant path is not supported",
 		turboQuantPathKind:        "reference_wrapper",
 		referenceTurboQuantActive: true,
-		tqBlockSize:               128,
+		tqBlockSize:               0,
+		tqLayoutKind:              turboquant.ReferenceLayoutKind,
+		tqLayoutVersion:           turboquant.BlockVersion,
 	}).RuntimeInfo()
 
 	if !info.Asymmetric || info.Symmetric {
@@ -141,8 +144,30 @@ func TestKVCacheRuntimeInfoAsymmetric(t *testing.T) {
 	if info.EffectiveK != "q8_0" || info.EffectiveV != "f16" {
 		t.Fatalf("unexpected effective split: %+v", info)
 	}
-	if info.TQBlockSize != 128 {
-		t.Fatalf("unexpected block size: %+v", info)
+	if info.TQBlockSize != 0 || info.TQLayoutKind != turboquant.ReferenceLayoutKind {
+		t.Fatalf("unexpected layout metadata: %+v", info)
+	}
+}
+
+func TestKVCacheRuntimeInfoNativeGroupedScaffold(t *testing.T) {
+	info := (&InputCache{
+		turboQuantPathKind: "native_grouped_scaffold",
+		tqBlockSize:        turboquant.NativeGroupSize,
+		tqLayoutKind:       turboquant.NativeLayoutKind128,
+		tqLayoutVersion:    turboquant.NativeLayoutVersion,
+		tqGroupCount:       2,
+		tqOriginalHeadDim:  130,
+		tqTailPad:          126,
+	}).RuntimeInfo()
+
+	if info.TurboQuantPathKind != "native_grouped_scaffold" {
+		t.Fatalf("unexpected path kind: %+v", info)
+	}
+	if info.TQLayoutKind != turboquant.NativeLayoutKind128 || info.TQBlockSize != turboquant.NativeGroupSize {
+		t.Fatalf("unexpected grouped layout metadata: %+v", info)
+	}
+	if info.TQGroupCount != 2 || info.TQOriginalHeadDim != 130 || info.TQTailPad != 126 {
+		t.Fatalf("unexpected grouped dimensions: %+v", info)
 	}
 }
 
