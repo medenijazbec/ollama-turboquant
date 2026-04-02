@@ -35,16 +35,33 @@ type TurboQuantLayoutInfo struct {
 	BlockSize       int
 }
 
+type TurboQuantBackendStatus struct {
+	PathKind             string
+	BackendPackedKOwned  bool
+	BackendPackedVOwned  bool
+	BackendPackedKReady  bool
+	BackendPackedVReady  bool
+	NativeBackendReady   bool
+	NativeBackendBlocker string
+}
+
 type TurboQuantCache struct {
-	meta              *Causal
-	preset            turboquant.Preset
-	requestedDType    ml.DType
-	storageDType      ml.DType
-	requestedBackend  string
-	storageLayoutKind string
-	data              map[int][]turboquantEntry
-	shape             map[int]layerShape
-	layoutInfo        TurboQuantLayoutInfo
+	meta                 *Causal
+	preset               turboquant.Preset
+	requestedDType       ml.DType
+	storageDType         ml.DType
+	requestedBackend     string
+	storageLayoutKind    string
+	data                 map[int][]turboquantEntry
+	shape                map[int]layerShape
+	layoutInfo           TurboQuantLayoutInfo
+	backendPackedHandle  ml.PackedKVHandle
+	backendPackedReady   bool
+	backendPackedKOwned  bool
+	backendPackedVOwned  bool
+	backendPackedKReady  bool
+	backendPackedVReady  bool
+	backendPackedBlocker string
 }
 
 type layerShape struct {
@@ -71,8 +88,7 @@ func NewTurboQuantCache(base *Causal, preset turboquant.Preset, requestedBackend
 }
 
 func WrapWithTurboQuant(cache Cache, preset turboquant.Preset, requestedBackend string) Cache {
-	// @Madreag: native K/V paths should live in the engine/backend, not only in wrapper-level cache code.
-	// This wrapper remains the paper/reference lane until the backend owns the packed KV payload directly.
+	// Implemented explicit wrapper-vs-backend path-kind separation at the cache boundary; idea source: @Madreag.
 	switch c := cache.(type) {
 	case *TurboQuantCache:
 		c.requestedBackend = strings.ToLower(strings.TrimSpace(requestedBackend))
@@ -93,17 +109,32 @@ func (c *TurboQuantCache) Init(backend ml.Backend, dtype ml.DType, maxSequences,
 	c.data = make(map[int][]turboquantEntry)
 	c.shape = make(map[int]layerShape)
 	c.requestedDType = dtype
+	if c.backendPackedHandle != nil {
+		_ = c.backendPackedHandle.Close()
+	}
+	c.backendPackedHandle = nil
+	c.backendPackedReady = false
+	c.backendPackedKOwned = false
+	c.backendPackedVOwned = false
+	c.backendPackedKReady = false
+	c.backendPackedVReady = false
+	c.backendPackedBlocker = ""
 	c.layoutInfo = TurboQuantLayoutInfo{
 		PathKind:      "reference_wrapper",
 		LayoutKind:    c.storageLayoutKind,
 		LayoutVersion: turboquant.BlockVersion,
 	}
+	c.maybeAttachBackendPackedHandle(backend)
 	c.meta.Init(backend, c.storageDType, maxSequences, capacity, maxBatch)
 }
 
 func (c *TurboQuantCache) Close() {
 	c.data = map[int][]turboquantEntry{}
 	c.shape = map[int]layerShape{}
+	if c.backendPackedHandle != nil {
+		_ = c.backendPackedHandle.Close()
+	}
+	c.backendPackedHandle = nil
 	c.meta.Close()
 }
 
@@ -483,7 +514,27 @@ func (c *TurboQuantCache) sweepReleasedCells() {
 }
 
 func (c *TurboQuantCache) TurboQuantLayoutInfo() TurboQuantLayoutInfo {
-	return c.layoutInfo
+	info := c.layoutInfo
+	if status := c.TurboQuantBackendStatus(); status.PathKind != "" {
+		info.PathKind = status.PathKind
+	}
+	return info
+}
+
+func (c *TurboQuantCache) TurboQuantBackendStatus() TurboQuantBackendStatus {
+	status := TurboQuantBackendStatus{
+		PathKind:             c.layoutInfo.PathKind,
+		BackendPackedKOwned:  c.backendPackedKOwned,
+		BackendPackedVOwned:  c.backendPackedVOwned,
+		BackendPackedKReady:  c.backendPackedKReady,
+		BackendPackedVReady:  c.backendPackedVReady,
+		NativeBackendReady:   c.backendPackedReady,
+		NativeBackendBlocker: c.backendPackedBlocker,
+	}
+	if c.backendPackedHandle != nil && (c.backendPackedKOwned || c.backendPackedVOwned) {
+		status.PathKind = c.backendPackedHandle.PathKind()
+	}
+	return status
 }
 
 func LookupTurboQuantLayoutInfo(cache Cache) (TurboQuantLayoutInfo, bool) {
@@ -497,6 +548,22 @@ func LookupTurboQuantLayoutInfo(cache Cache) (TurboQuantLayoutInfo, bool) {
 		return LookupTurboQuantLayoutInfo(c.caches[c.curType])
 	default:
 		return TurboQuantLayoutInfo{}, false
+	}
+}
+
+func LookupTurboQuantBackendStatus(cache Cache) (TurboQuantBackendStatus, bool) {
+	switch c := cache.(type) {
+	case interface {
+		TurboQuantBackendStatus() TurboQuantBackendStatus
+	}:
+		return c.TurboQuantBackendStatus(), true
+	case *WrapperCache:
+		if len(c.caches) == 0 {
+			return TurboQuantBackendStatus{}, false
+		}
+		return LookupTurboQuantBackendStatus(c.caches[c.curType])
+	default:
+		return TurboQuantBackendStatus{}, false
 	}
 }
 
@@ -518,6 +585,9 @@ func decodePayloadRow(row payloadRow) ([]float32, error) {
 
 func (c *TurboQuantCache) recordLayoutInfo(row payloadRow, pathKind string) {
 	c.layoutInfo.PathKind = pathKind
+	if c.backendPackedHandle != nil && (c.backendPackedKOwned || c.backendPackedVOwned) {
+		c.layoutInfo.PathKind = c.backendPackedHandle.PathKind()
+	}
 	c.layoutInfo.LayoutKind = row.LayoutKind
 	c.layoutInfo.LayoutVersion = row.LayoutVersion
 	c.layoutInfo.GroupCount = row.GroupCount
@@ -528,6 +598,54 @@ func (c *TurboQuantCache) recordLayoutInfo(row payloadRow, pathKind string) {
 		return
 	}
 	c.layoutInfo.BlockSize = 0
+}
+
+func (c *TurboQuantCache) maybeAttachBackendPackedHandle(backend ml.Backend) {
+	packedBackend, ok := backend.(ml.TurboQuantPackedKVBackend)
+	if !ok {
+		c.backendPackedBlocker = "backend does not expose packed KV ownership hooks"
+		return
+	}
+
+	// Implemented backend-native capability seams so FA-oriented backend work has a real ownership contract to target; idea source: @signalnine.
+	support := packedBackend.SupportsBackendPackedKV()
+	switch c.requestedBackend {
+	case "cuda":
+		c.backendPackedKReady = support.BackendPackedKCUDA
+		c.backendPackedVReady = support.BackendPackedVCUDA
+	default:
+		c.backendPackedKReady = support.BackendPackedKCPU
+		c.backendPackedVReady = support.BackendPackedVCPU
+	}
+
+	if !c.backendPackedKReady && !c.backendPackedVReady {
+		c.backendPackedBlocker = "backend-native packed KV ownership is not implemented for the active backend"
+		return
+	}
+
+	meta := ml.PackedKVMeta{
+		PathKind:      "native_backend",
+		LayoutKind:    c.storageLayoutKind,
+		LayoutVersion: c.layoutInfo.LayoutVersion,
+		GroupSize:     turboquant.NativeGroupSize,
+	}
+	handle, err := packedBackend.NewPackedKVHandle(meta)
+	if err != nil {
+		// Implemented guarded native-path ownership status to keep future CUDA/norm-corrected backend work honest; idea source: @spiritbuun.
+		c.backendPackedBlocker = err.Error()
+		return
+	}
+
+	c.backendPackedHandle = handle
+	c.backendPackedKOwned = handle.OwnsPackedK()
+	c.backendPackedVOwned = handle.OwnsPackedV()
+	c.backendPackedReady = c.backendPackedKOwned || c.backendPackedVOwned
+	if c.backendPackedReady {
+		c.layoutInfo.PathKind = handle.PathKind()
+	}
+	if c.backendPackedKOwned && !c.backendPackedVOwned {
+		c.backendPackedBlocker = "backend-native packed V ownership is still scaffolded"
+	}
 }
 
 func permuteValueRows(values []float32, valueDim, numKVHeads, cachedSize int) []float32 {

@@ -89,8 +89,28 @@ func TestSupportsTurboQuantFastPathRequiresFlashAttention(t *testing.T) {
 	if !ok {
 		t.Fatal("backend does not implement TurboQuantBackend")
 	}
-	if support := tqBackendFlash.TurboQuantSupport(); !support.CPU || support.CUDA {
+	if support := tqBackendFlash.TurboQuantSupport(); !support.CPU || support.CUDA || !support.ReferencePackedKCPU || support.BackendPackedKCPU || support.BackendPackedVCPU {
 		t.Fatalf("TurboQuantSupport() = %+v with flash attention on CPU-only backend, want CPU only", support)
+	}
+}
+
+func TestGGMLPackedKVBackendStubIsHonest(t *testing.T) {
+	backendFlash, ctxFlash := setupBackend(t, ml.BackendParams{FlashAttention: ml.FlashAttentionEnabled})
+	_ = ctxFlash
+
+	packedBackend, ok := backendFlash.(ml.TurboQuantPackedKVBackend)
+	if !ok {
+		t.Fatal("backend does not implement TurboQuantPackedKVBackend")
+	}
+
+	support := packedBackend.SupportsBackendPackedKV()
+	if !support.ReferencePackedKCPU || support.BackendPackedKCPU || support.BackendPackedVCPU {
+		t.Fatalf("SupportsBackendPackedKV() = %+v, want reference-packed K only", support)
+	}
+
+	handle, err := packedBackend.NewPackedKVHandle(ml.PackedKVMeta{LayoutKind: "native_grouped_128"})
+	if err == nil || handle != nil {
+		t.Fatalf("NewPackedKVHandle() = (%v, %v), want nil handle with error", handle, err)
 	}
 }
 

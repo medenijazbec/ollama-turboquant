@@ -10,6 +10,21 @@ import (
 	"github.com/ollama/ollama/turboquant"
 )
 
+type fakePackedKVHandle struct {
+	pathKind         string
+	ownsPackedK      bool
+	ownsPackedV      bool
+	supportsFastGetK bool
+	supportsFastGetV bool
+}
+
+func (h fakePackedKVHandle) PathKind() string       { return h.pathKind }
+func (h fakePackedKVHandle) OwnsPackedK() bool      { return h.ownsPackedK }
+func (h fakePackedKVHandle) OwnsPackedV() bool      { return h.ownsPackedV }
+func (h fakePackedKVHandle) SupportsFastGetK() bool { return h.supportsFastGetK }
+func (h fakePackedKVHandle) SupportsFastGetV() bool { return h.supportsFastGetV }
+func (h fakePackedKVHandle) Close() error           { return nil }
+
 type decodedSequenceEntry struct {
 	pos   int32
 	key   []float32
@@ -204,6 +219,60 @@ func TestTurboQuantCacheStoresNativeGroupedRowsWhenExplicitlyEnabled(t *testing.
 	}
 	if cache.layoutInfo.LayoutKind != turboquant.NativeLayoutKind128 || cache.layoutInfo.BlockSize != turboquant.NativeGroupSize {
 		t.Fatalf("unexpected cache layout info: %+v", cache.layoutInfo)
+	}
+}
+
+func TestTurboQuantCacheBackendStatusDefaultsToReferenceWrapper(t *testing.T) {
+	cache := NewTurboQuantCache(NewCausalCache(nil), turboquant.PresetTQ35, "")
+	defer cache.Close()
+
+	cache.Init(&testBackend{}, ml.DTypeTQ35, 1, 16, 16)
+
+	status := cache.TurboQuantBackendStatus()
+	if status.PathKind != "reference_wrapper" {
+		t.Fatalf("path kind = %q, want reference_wrapper", status.PathKind)
+	}
+	if status.BackendPackedKOwned || status.BackendPackedVOwned {
+		t.Fatalf("unexpected backend ownership status: %+v", status)
+	}
+	if status.NativeBackendReady {
+		t.Fatalf("native backend ready = true, want false")
+	}
+	if status.NativeBackendBlocker == "" {
+		t.Fatal("expected explicit blocker for backend-native ownership")
+	}
+}
+
+func TestTurboQuantCacheBackendStatusReflectsAttachedHandle(t *testing.T) {
+	cache := NewTurboQuantCache(NewCausalCache(nil), turboquant.PresetTQ35, "")
+	defer cache.Close()
+
+	cache.Init(&testBackend{}, ml.DTypeTQ35, 1, 16, 16)
+	cache.backendPackedHandle = fakePackedKVHandle{
+		pathKind:         "native_backend",
+		ownsPackedK:      true,
+		ownsPackedV:      false,
+		supportsFastGetK: true,
+	}
+	cache.backendPackedReady = true
+	cache.backendPackedKOwned = true
+	cache.backendPackedVOwned = false
+	cache.backendPackedKReady = true
+	cache.backendPackedVReady = false
+	cache.backendPackedBlocker = "backend-native packed V ownership is still scaffolded"
+
+	status := cache.TurboQuantBackendStatus()
+	if status.PathKind != "native_backend" {
+		t.Fatalf("path kind = %q, want native_backend", status.PathKind)
+	}
+	if !status.BackendPackedKOwned || status.BackendPackedVOwned {
+		t.Fatalf("unexpected backend ownership status: %+v", status)
+	}
+	if !status.NativeBackendReady {
+		t.Fatalf("native backend ready = false, want true")
+	}
+	if status.NativeBackendBlocker == "" {
+		t.Fatal("expected explicit V-side blocker")
 	}
 }
 

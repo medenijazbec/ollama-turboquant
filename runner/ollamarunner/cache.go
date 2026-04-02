@@ -51,6 +51,12 @@ type InputCache struct {
 	turboQuantPathKind        string
 	nativeTurboQuantActive    bool
 	referenceTurboQuantActive bool
+	backendPackedKOwned       bool
+	backendPackedVOwned       bool
+	backendPackedKAvailable   bool
+	backendPackedVAvailable   bool
+	nativeBackendReady        bool
+	nativeBackendBlocker      string
 	vTurboSupported           bool
 	tqBlockSize               int
 	tqLayoutKind              string
@@ -92,6 +98,12 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	turboQuantPathKind := "disabled"
 	nativeTurboQuantActive := false
 	referenceTurboQuantActive := false
+	backendPackedKOwned := false
+	backendPackedVOwned := false
+	backendPackedKAvailable := false
+	backendPackedVAvailable := false
+	nativeBackendReady := false
+	nativeBackendBlocker := ""
 	vTurboSupported := normalizedKVCacheTypeV == "" || normalizedKVCacheTypeV == "f16"
 	tqBlockSize := 0
 	tqLayoutKind := ""
@@ -149,12 +161,34 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 			if info.PathKind != "" {
 				turboQuantPathKind = info.PathKind
 			}
+			if turboQuantPathKind == "native_grouped_scaffold" {
+				referenceTurboQuantActive = false
+			}
 			tqLayoutKind = info.LayoutKind
 			tqLayoutVersion = info.LayoutVersion
 			tqGroupCount = info.GroupCount
 			tqOriginalHeadDim = info.OriginalHeadDim
 			tqTailPad = info.TailPad
 			tqBlockSize = info.BlockSize
+		}
+		if status, ok := kvcache.LookupTurboQuantBackendStatus(cache); ok {
+			backendPackedKOwned = status.BackendPackedKOwned
+			backendPackedVOwned = status.BackendPackedVOwned
+			backendPackedKAvailable = status.BackendPackedKReady
+			backendPackedVAvailable = status.BackendPackedVReady
+			nativeBackendReady = status.NativeBackendReady
+			nativeBackendBlocker = status.NativeBackendBlocker
+			nativeTurboQuantActive = status.BackendPackedKOwned || status.BackendPackedVOwned
+			if nativeTurboQuantActive {
+				turboQuantPathKind = "native_backend"
+				referenceTurboQuantActive = false
+			}
+			if status.PathKind != "" {
+				turboQuantPathKind = status.PathKind
+			}
+		}
+		if nativeBackendBlocker != "" && fallbackReason == "" {
+			fallbackReason = nativeBackendBlocker
 		}
 		if kvCachePathK == "" {
 			kvCachePathK = kvCachePath
@@ -217,6 +251,12 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		turboQuantPathKind:        turboQuantPathKind,
 		nativeTurboQuantActive:    nativeTurboQuantActive,
 		referenceTurboQuantActive: referenceTurboQuantActive,
+		backendPackedKOwned:       backendPackedKOwned,
+		backendPackedVOwned:       backendPackedVOwned,
+		backendPackedKAvailable:   backendPackedKAvailable,
+		backendPackedVAvailable:   backendPackedVAvailable,
+		nativeBackendReady:        nativeBackendReady,
+		nativeBackendBlocker:      nativeBackendBlocker,
 		vTurboSupported:           vTurboSupported,
 		tqBlockSize:               tqBlockSize,
 		tqLayoutKind:              tqLayoutKind,
@@ -251,13 +291,13 @@ func resolveKVCachePath(backend ml.Backend, dtype ml.DType, requestedBackend str
 
 	support := backendTurboQuantSupport(backend)
 	if requestedBackend == "cuda" {
-		if support.CUDA {
+		if support.ReferencePackedKCUDA || support.CUDA {
 			return "turboquant-cuda-fastpath"
 		}
 		return "dense-fallback"
 	}
 
-	if support.CPU {
+	if support.ReferencePackedKCPU || support.CPU {
 		return "turboquant-cpu-fastpath"
 	}
 
@@ -338,6 +378,12 @@ type KVCacheRuntimeInfo struct {
 	TurboQuantPathKind        string
 	NativeTurboQuantActive    bool
 	ReferenceTurboQuantActive bool
+	BackendPackedKOwned       bool
+	BackendPackedVOwned       bool
+	BackendPackedKAvailable   bool
+	BackendPackedVAvailable   bool
+	NativeBackendReady        bool
+	NativeBackendBlocker      string
 	VTurboSupported           bool
 	TQBlockSize               int
 	TQLayoutKind              string
@@ -371,6 +417,12 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		TurboQuantPathKind:        c.turboQuantPathKind,
 		NativeTurboQuantActive:    c.nativeTurboQuantActive,
 		ReferenceTurboQuantActive: c.referenceTurboQuantActive,
+		BackendPackedKOwned:       c.backendPackedKOwned,
+		BackendPackedVOwned:       c.backendPackedVOwned,
+		BackendPackedKAvailable:   c.backendPackedKAvailable,
+		BackendPackedVAvailable:   c.backendPackedVAvailable,
+		NativeBackendReady:        c.nativeBackendReady,
+		NativeBackendBlocker:      c.nativeBackendBlocker,
 		VTurboSupported:           c.vTurboSupported,
 		TQBlockSize:               c.tqBlockSize,
 		TQLayoutKind:              c.tqLayoutKind,

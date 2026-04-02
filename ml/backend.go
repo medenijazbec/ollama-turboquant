@@ -45,6 +45,12 @@ type TurboQuantSupport struct {
 	KCUDA                  bool
 	VCPU                   bool
 	VCUDA                  bool
+	ReferencePackedKCPU    bool
+	ReferencePackedKCUDA   bool
+	BackendPackedKCPU      bool
+	BackendPackedKCUDA     bool
+	BackendPackedVCPU      bool
+	BackendPackedVCUDA     bool
 	RequiresFlashAttention bool
 }
 
@@ -52,6 +58,35 @@ type TurboQuantSupport struct {
 // storage directly without fallback decode in the cache layer.
 type TurboQuantBackend interface {
 	TurboQuantSupport() TurboQuantSupport
+}
+
+type PackedKVMeta struct {
+	PathKind        string
+	LayoutKind      string
+	LayoutVersion   int
+	GroupSize       int
+	GroupCount      int
+	OriginalHeadDim int
+	TailPad         int
+	KeyDType        DType
+	ValueDType      DType
+	NumKVHeads      int
+	PermutedV       bool
+}
+
+type PackedKVHandle interface {
+	PathKind() string
+	OwnsPackedK() bool
+	OwnsPackedV() bool
+	SupportsFastGetK() bool
+	SupportsFastGetV() bool
+	Close() error
+}
+
+type TurboQuantPackedKVBackend interface {
+	TurboQuantBackend
+	SupportsBackendPackedKV() TurboQuantSupport
+	NewPackedKVHandle(meta PackedKVMeta) (PackedKVHandle, error)
 }
 
 // CacheConfig controls optimizations (mostly backend-specific) that may transform

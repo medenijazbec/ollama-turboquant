@@ -171,6 +171,29 @@ func TestKVCacheRuntimeInfoNativeGroupedScaffold(t *testing.T) {
 	}
 }
 
+func TestKVCacheRuntimeInfoBackendOwnershipFields(t *testing.T) {
+	info := (&InputCache{
+		turboQuantPathKind:      "native_backend",
+		nativeTurboQuantActive:  true,
+		backendPackedKOwned:     true,
+		backendPackedVOwned:     false,
+		backendPackedKAvailable: true,
+		backendPackedVAvailable: false,
+		nativeBackendReady:      true,
+		nativeBackendBlocker:    "backend-native packed V ownership is still scaffolded",
+	}).RuntimeInfo()
+
+	if info.TurboQuantPathKind != "native_backend" || !info.NativeTurboQuantActive {
+		t.Fatalf("unexpected native backend runtime info: %+v", info)
+	}
+	if !info.BackendPackedKOwned || info.BackendPackedVOwned {
+		t.Fatalf("unexpected backend ownership fields: %+v", info)
+	}
+	if info.NativeBackendBlocker == "" {
+		t.Fatal("expected native backend blocker")
+	}
+}
+
 func TestFindCacheSlot(t *testing.T) {
 	type expected struct {
 		result int
@@ -731,7 +754,20 @@ func (b *runnerTestBackend) CacheConfig() ml.CacheConfig {
 }
 
 func (b *runnerTestBackend) TurboQuantSupport() ml.TurboQuantSupport {
-	return ml.TurboQuantSupport{CPU: b.supportsTurboQuantFastPath, CUDA: b.supportsTurboQuantCUDA}
+	return ml.TurboQuantSupport{
+		CPU:                  b.supportsTurboQuantFastPath,
+		CUDA:                 b.supportsTurboQuantCUDA,
+		ReferencePackedKCPU:  b.supportsTurboQuantFastPath,
+		ReferencePackedKCUDA: b.supportsTurboQuantCUDA,
+	}
+}
+
+func (b *runnerTestBackend) SupportsBackendPackedKV() ml.TurboQuantSupport {
+	return b.TurboQuantSupport()
+}
+
+func (b *runnerTestBackend) NewPackedKVHandle(meta ml.PackedKVMeta) (ml.PackedKVHandle, error) {
+	return nil, fmt.Errorf("backend-native packed KV ownership is not implemented for %s", meta.LayoutKind)
 }
 
 type runnerTestConfig struct{}
@@ -774,7 +810,7 @@ func TestNewInputCacheWrapsTurboQuantCausalCaches(t *testing.T) {
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -794,7 +830,7 @@ func TestNewInputCachePreservesWrapperNonCausalCaches(t *testing.T) {
 		backend,
 	)
 
-	inputCache, err := NewInputCache(model, "tq25", "", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq25", "", "", "", 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -816,7 +852,7 @@ func TestNewInputCacheLeavesNonTurboQuantModesUnwrapped(t *testing.T) {
 	backend := &runnerTestBackend{}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "q4_0", "", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "q4_0", "", "", "", 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -833,7 +869,7 @@ func TestNewInputCacheFallsBackToDenseWhenTurboQuantFastPathUnsupported(t *testi
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: false}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -848,13 +884,22 @@ func TestNewInputCacheFallsBackToDenseWhenTurboQuantFastPathUnsupported(t *testi
 	if info.Path != "dense-fallback" {
 		t.Fatalf("runtime path = %q, want dense-fallback", info.Path)
 	}
+	if info.TurboQuantPathKind != "reference_wrapper" {
+		t.Fatalf("runtime path kind = %q, want reference_wrapper", info.TurboQuantPathKind)
+	}
+	if info.NativeBackendReady {
+		t.Fatalf("native backend ready = true, want false")
+	}
+	if info.NativeBackendBlocker == "" {
+		t.Fatal("expected explicit backend-native blocker")
+	}
 }
 
 func TestNewInputCacheTracksExplicitCUDARequestWithoutCUDAFastPath(t *testing.T) {
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "cuda", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "cuda", 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}

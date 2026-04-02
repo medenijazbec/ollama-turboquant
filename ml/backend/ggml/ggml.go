@@ -702,7 +702,7 @@ func (b *Backend) TurboQuantSupport() ml.TurboQuantSupport {
 		switch C.ggml_backend_dev_type(dev) {
 		case C.GGML_BACKEND_DEVICE_TYPE_GPU, C.GGML_BACKEND_DEVICE_TYPE_IGPU:
 			// @Madreag: V-side turbo path is gated on Flash Attention support.
-			// @TheTom: unsupported V turbo paths should fail/fallback clearly rather than degrade ambiguously.
+			// Implemented explicit unsupported-V fallback reporting in the backend path instead of ambiguous degradation; idea source: @TheTom.
 			return ml.TurboQuantSupport{RequiresFlashAttention: true}
 		}
 	}
@@ -710,8 +710,19 @@ func (b *Backend) TurboQuantSupport() ml.TurboQuantSupport {
 	return ml.TurboQuantSupport{
 		CPU:                    true,
 		KCPU:                   true,
+		ReferencePackedKCPU:    true,
+		BackendPackedKCPU:      false,
+		BackendPackedVCPU:      false,
 		RequiresFlashAttention: true,
 	}
+}
+
+func (b *Backend) SupportsBackendPackedKV() ml.TurboQuantSupport {
+	return b.TurboQuantSupport()
+}
+
+func (b *Backend) NewPackedKVHandle(meta ml.PackedKVMeta) (ml.PackedKVHandle, error) {
+	return nil, fmt.Errorf("ggml backend-native packed KV ownership is not implemented for layout %s", meta.LayoutKind)
 }
 
 func (b *Backend) SupportsTurboQuantFastPath() bool {

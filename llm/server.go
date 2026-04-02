@@ -1739,6 +1739,12 @@ type CompletionResponse struct {
 	TurboQuantPathKind        string        `json:"turboquant_path_kind,omitempty"`
 	NativeTurboQuantActive    bool          `json:"native_turboquant_active,omitempty"`
 	ReferenceTurboQuantActive bool          `json:"reference_turboquant_active,omitempty"`
+	BackendPackedKOwned       bool          `json:"backend_packed_k_owned,omitempty"`
+	BackendPackedVOwned       bool          `json:"backend_packed_v_owned,omitempty"`
+	BackendPackedKAvailable   bool          `json:"backend_packed_k_available,omitempty"`
+	BackendPackedVAvailable   bool          `json:"backend_packed_v_available,omitempty"`
+	NativeBackendReady        bool          `json:"native_backend_ready,omitempty"`
+	NativeBackendBlocker      string        `json:"native_backend_blocker,omitempty"`
 	FAEnabled                 bool          `json:"fa_enabled,omitempty"`
 	VTurboSupported           bool          `json:"v_turbo_supported,omitempty"`
 	TQBlockSize               int           `json:"tq_block_size,omitempty"`

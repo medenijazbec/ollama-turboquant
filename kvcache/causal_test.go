@@ -639,7 +639,7 @@ func (b *testBackend) CacheConfig() ml.CacheConfig {
 }
 
 func (b *testBackend) TurboQuantSupport() ml.TurboQuantSupport {
-	return ml.TurboQuantSupport{CPU: b.fastPath}
+	return ml.TurboQuantSupport{CPU: b.fastPath, ReferencePackedKCPU: b.fastPath}
 }
 
 type testContext struct {
