@@ -238,6 +238,9 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 	modes := resolveKVCacheModes(opts)
 	backendMode := resolveKVCacheBackendMode(opts)
 	logKVCacheModeOverrides(modes)
+	if !fa && isQuantizedKVCacheType(modes.V.Effective) {
+		slog.Warn("requested V-side turboquant may fall back at runtime because flash attention is disabled", "requested_k_type", modes.K.Effective, "requested_v_type", modes.V.Effective, "backend", backendMode.Effective)
+	}
 
 	if tok == nil {
 		flashAttention := ml.FlashAttentionAuto
@@ -476,6 +479,16 @@ func selectLegacyKVCacheType(mode kvCacheMode, flashAttention ml.FlashAttentionT
 	}
 
 	return kvCacheSelection{Mode: mode, Assigned: mode.Effective}
+}
+
+func isQuantizedKVCacheType(mode string) bool {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "q4_0", "q8_0", "tq25", "tq35", "tq3", "tq4":
+		return true
+	default:
+		return false
+	}
 }
 
 func selectEngineKVCacheType(mode kvCacheMode, flashAttentionEnabled bool, supports func(string) bool) kvCacheSelection {
@@ -1723,9 +1736,11 @@ type CompletionResponse struct {
 	KVCacheEffective          string        `json:"kv_cache_effective,omitempty"`
 	KVCacheRequestedK         string        `json:"kv_cache_requested_k,omitempty"`
 	KVCacheRequestedV         string        `json:"kv_cache_requested_v,omitempty"`
+	RequestedMode             string        `json:"requested_mode,omitempty"`
 	ResolvedKVCacheType       string        `json:"resolved_kv_cache_type,omitempty"`
 	ResolvedKVCacheTypeK      string        `json:"resolved_kv_cache_type_k,omitempty"`
 	ResolvedKVCacheTypeV      string        `json:"resolved_kv_cache_type_v,omitempty"`
+	EffectiveMode             string        `json:"effective_mode,omitempty"`
 	KVAlgoResolved            string        `json:"kv_algo_resolved,omitempty"`
 	KVAlgoResolvedK           string        `json:"kv_algo_resolved_k,omitempty"`
 	KVAlgoResolvedV           string        `json:"kv_algo_resolved_v,omitempty"`
@@ -1736,6 +1751,8 @@ type CompletionResponse struct {
 	KVSymmetric               bool          `json:"kv_symmetric,omitempty"`
 	KVAsymmetric              bool          `json:"kv_asymmetric,omitempty"`
 	FallbackReason            string        `json:"fallback_reason,omitempty"`
+	FallbackApplied           bool          `json:"fallback_applied,omitempty"`
+	KOnlyFallback             bool          `json:"k_only_fallback,omitempty"`
 	TurboQuantPathKind        string        `json:"turboquant_path_kind,omitempty"`
 	NativeTurboQuantActive    bool          `json:"native_turboquant_active,omitempty"`
 	ReferenceTurboQuantActive bool          `json:"reference_turboquant_active,omitempty"`
@@ -1746,6 +1763,7 @@ type CompletionResponse struct {
 	NativeBackendReady        bool          `json:"native_backend_ready,omitempty"`
 	NativeBackendBlocker      string        `json:"native_backend_blocker,omitempty"`
 	FAEnabled                 bool          `json:"fa_enabled,omitempty"`
+	FARequiredForVTurbo       bool          `json:"fa_required_for_v_turbo,omitempty"`
 	VTurboSupported           bool          `json:"v_turbo_supported,omitempty"`
 	TQBlockSize               int           `json:"tq_block_size,omitempty"`
 	TQLayoutKind              string        `json:"tq_layout_kind,omitempty"`

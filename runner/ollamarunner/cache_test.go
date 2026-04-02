@@ -717,6 +717,7 @@ func TestShiftCacheSlot(t *testing.T) {
 type runnerTestBackend struct {
 	supportsTurboQuantFastPath bool
 	supportsTurboQuantCUDA     bool
+	requiresFlashAttention     bool
 }
 
 func (b *runnerTestBackend) Close() {}
@@ -755,10 +756,11 @@ func (b *runnerTestBackend) CacheConfig() ml.CacheConfig {
 
 func (b *runnerTestBackend) TurboQuantSupport() ml.TurboQuantSupport {
 	return ml.TurboQuantSupport{
-		CPU:                  b.supportsTurboQuantFastPath,
-		CUDA:                 b.supportsTurboQuantCUDA,
-		ReferencePackedKCPU:  b.supportsTurboQuantFastPath,
-		ReferencePackedKCUDA: b.supportsTurboQuantCUDA,
+		CPU:                    b.supportsTurboQuantFastPath,
+		CUDA:                   b.supportsTurboQuantCUDA,
+		ReferencePackedKCPU:    b.supportsTurboQuantFastPath,
+		ReferencePackedKCUDA:   b.supportsTurboQuantCUDA,
+		RequiresFlashAttention: b.requiresFlashAttention,
 	}
 }
 
@@ -810,7 +812,7 @@ func TestNewInputCacheWrapsTurboQuantCausalCaches(t *testing.T) {
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", "", "", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -830,7 +832,7 @@ func TestNewInputCachePreservesWrapperNonCausalCaches(t *testing.T) {
 		backend,
 	)
 
-	inputCache, err := NewInputCache(model, "tq25", "", "", "", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq25", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +854,7 @@ func TestNewInputCacheLeavesNonTurboQuantModesUnwrapped(t *testing.T) {
 	backend := &runnerTestBackend{}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "q4_0", "", "", "", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "q4_0", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,7 +871,7 @@ func TestNewInputCacheFallsBackToDenseWhenTurboQuantFastPathUnsupported(t *testi
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: false}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", "", "", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -899,7 +901,7 @@ func TestNewInputCacheTracksExplicitCUDARequestWithoutCUDAFastPath(t *testing.T)
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", "", "cuda", 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "cuda", ml.FlashAttentionDisabled, 16, 1, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -913,5 +915,59 @@ func TestNewInputCacheTracksExplicitCUDARequestWithoutCUDAFastPath(t *testing.T)
 	}
 	if info.Path != "dense-fallback" {
 		t.Fatalf("runtime path = %q, want dense-fallback", info.Path)
+	}
+}
+
+func TestNewInputCacheFallsBackToKOnlyWhenVTurboRequiresFlashAttention(t *testing.T) {
+	backend := &runnerTestBackend{supportsTurboQuantFastPath: true, requiresFlashAttention: true}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := inputCache.RuntimeInfo()
+	if info.EffectiveK != "tq35" || info.EffectiveV != "f16" {
+		t.Fatalf("unexpected effective split: %+v", info)
+	}
+	if !info.FallbackApplied || !info.KOnlyFallback {
+		t.Fatalf("expected explicit K-only fallback, got %+v", info)
+	}
+	if info.VTurboSupported {
+		t.Fatalf("expected V turbo to be unsupported without Flash Attention, got %+v", info)
+	}
+	if !info.FARequiredForVTurbo || info.FAEnabled {
+		t.Fatalf("unexpected Flash Attention flags: %+v", info)
+	}
+	if info.RequestedMode != "tq35" || info.EffectiveMode != "k=tq35,v=f16" {
+		t.Fatalf("unexpected mode summaries: %+v", info)
+	}
+	if info.FallbackReason == "" {
+		t.Fatal("expected fallback reason")
+	}
+}
+
+func TestNewInputCacheKeepsVTurboWhenFlashAttentionIsEnabled(t *testing.T) {
+	backend := &runnerTestBackend{supportsTurboQuantFastPath: true, requiresFlashAttention: true}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionEnabled, 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := inputCache.RuntimeInfo()
+	if info.EffectiveK != "tq35" || info.EffectiveV != "tq35" {
+		t.Fatalf("unexpected effective split: %+v", info)
+	}
+	if info.FallbackApplied || info.KOnlyFallback {
+		t.Fatalf("did not expect fallback with Flash Attention enabled: %+v", info)
+	}
+	if !info.VTurboSupported || !info.FARequiredForVTurbo || !info.FAEnabled {
+		t.Fatalf("unexpected Flash Attention gating metadata: %+v", info)
+	}
+	if info.RequestedMode != "tq35" || info.EffectiveMode != "tq35" {
+		t.Fatalf("unexpected mode summaries: %+v", info)
 	}
 }

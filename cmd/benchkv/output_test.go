@@ -27,7 +27,69 @@ func TestWriteCSV(t *testing.T) {
 	if !strings.Contains(string(data), "quant,kv_mode_requested,kv_mode_requested_k,kv_mode_requested_v,kv_mode_resolved") {
 		t.Fatal("expected extended csv header")
 	}
+	if !strings.Contains(string(data), "requested_mode,effective_mode") {
+		t.Fatal("expected requested/effective mode csv header")
+	}
+	if !strings.Contains(string(data), "fallback_applied,k_only_fallback") {
+		t.Fatal("expected fallback columns in csv header")
+	}
+	if !strings.Contains(string(data), "fa_required_for_v_turbo") {
+		t.Fatal("expected Flash Attention gating column in csv header")
+	}
 	if !strings.Contains(string(data), "kv_algo_resolved") {
 		t.Fatal("expected kv algorithm csv header")
+	}
+}
+
+func TestValidateResolvedKVModesRequiresExplicitFallbackMetadata(t *testing.T) {
+	row := workerResult{
+		KVModeRequested:     "tq35",
+		KVModeRequestedK:    "tq35",
+		KVModeRequestedV:    "tq35",
+		KVModeResolved:      "mixed",
+		KVModeResolvedK:     "tq35",
+		KVModeResolvedV:     "f16",
+		RequestedMode:       "tq35",
+		EffectiveMode:       "k=tq35,v=f16",
+		KVAlgoResolved:      "paper",
+		KVPath:              "mixed",
+		KVPathK:             "turboquant-cpu-fastpath",
+		KVPathV:             "dense-fallback",
+		FallbackApplied:     false,
+		KOnlyFallback:       false,
+		FARequiredForVTurbo: true,
+		FAEnabled:           false,
+		VTurboSupported:     false,
+	}
+
+	if err := validateResolvedKVModes(row); err == nil {
+		t.Fatal("expected ambiguous downgrade to fail validation")
+	}
+}
+
+func TestValidateResolvedKVModesAllowsExplicitKOnlyFallback(t *testing.T) {
+	row := workerResult{
+		KVModeRequested:     "tq35",
+		KVModeRequestedK:    "tq35",
+		KVModeRequestedV:    "tq35",
+		KVModeResolved:      "mixed",
+		KVModeResolvedK:     "tq35",
+		KVModeResolvedV:     "f16",
+		RequestedMode:       "tq35",
+		EffectiveMode:       "k=tq35,v=f16",
+		KVAlgoResolved:      "paper",
+		KVPath:              "mixed",
+		KVPathK:             "turboquant-cpu-fastpath",
+		KVPathV:             "dense-fallback",
+		FallbackApplied:     true,
+		KOnlyFallback:       true,
+		FallbackReason:      "requested V turboquant requires Flash Attention on the active backend; falling back to f16 on V",
+		FARequiredForVTurbo: true,
+		FAEnabled:           false,
+		VTurboSupported:     false,
+	}
+
+	if err := validateResolvedKVModes(row); err != nil {
+		t.Fatalf("expected explicit K-only fallback to validate, got %v", err)
 	}
 }

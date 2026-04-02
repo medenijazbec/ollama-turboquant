@@ -983,9 +983,11 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					KVCacheEffective:          s.kvCacheInfo.Effective,
 					KVCacheRequestedK:         s.kvCacheInfo.RequestedK,
 					KVCacheRequestedV:         s.kvCacheInfo.RequestedV,
+					RequestedMode:             s.kvCacheInfo.RequestedMode,
 					ResolvedKVCacheType:       s.kvCacheInfo.Effective,
 					ResolvedKVCacheTypeK:      s.kvCacheInfo.EffectiveK,
 					ResolvedKVCacheTypeV:      s.kvCacheInfo.EffectiveV,
+					EffectiveMode:             s.kvCacheInfo.EffectiveMode,
 					KVAlgoResolved:            s.kvCacheInfo.Algorithm,
 					KVAlgoResolvedK:           s.kvCacheInfo.AlgorithmK,
 					KVAlgoResolvedV:           s.kvCacheInfo.AlgorithmV,
@@ -996,6 +998,8 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					KVSymmetric:               s.kvCacheInfo.Symmetric,
 					KVAsymmetric:              s.kvCacheInfo.Asymmetric,
 					FallbackReason:            s.kvCacheInfo.FallbackReason,
+					FallbackApplied:           s.kvCacheInfo.FallbackApplied,
+					KOnlyFallback:             s.kvCacheInfo.KOnlyFallback,
 					TurboQuantPathKind:        s.kvCacheInfo.TurboQuantPathKind,
 					NativeTurboQuantActive:    s.kvCacheInfo.NativeTurboQuantActive,
 					ReferenceTurboQuantActive: s.kvCacheInfo.ReferenceTurboQuantActive,
@@ -1006,6 +1010,7 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					NativeBackendReady:        s.kvCacheInfo.NativeBackendReady,
 					NativeBackendBlocker:      s.kvCacheInfo.NativeBackendBlocker,
 					FAEnabled:                 s.lastLoad.FlashAttention == ml.FlashAttentionEnabled,
+					FARequiredForVTurbo:       s.kvCacheInfo.FARequiredForVTurbo,
 					VTurboSupported:           s.kvCacheInfo.VTurboSupported,
 					TQBlockSize:               s.kvCacheInfo.TQBlockSize,
 					TQLayoutKind:              s.kvCacheInfo.TQLayoutKind,
@@ -1218,6 +1223,7 @@ func (s *Server) allocModel(
 	kvCacheTypeK string,
 	kvCacheTypeV string,
 	kvCacheBackend string,
+	flashAttention ml.FlashAttentionType,
 	kvSize int,
 	multiUserCache bool,
 ) (panicErr error) {
@@ -1259,7 +1265,7 @@ func (s *Server) allocModel(
 		}
 	}
 
-	s.cache, err = NewInputCache(s.model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend, int32(kvSize), parallel, s.batchSize, multiUserCache)
+	s.cache, err = NewInputCache(s.model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend, flashAttention, int32(kvSize), parallel, s.batchSize, multiUserCache)
 	if err != nil {
 		return err
 	}
@@ -1348,7 +1354,7 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 
 		s.batchSize = req.BatchSize
 
-		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KvCacheTypeK, req.KvCacheTypeV, req.KvCacheBackend, req.KvSize, req.MultiUserCache)
+		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KvCacheTypeK, req.KvCacheTypeV, req.KvCacheBackend, req.FlashAttention, req.KvSize, req.MultiUserCache)
 		if err != nil {
 			s.closeModel()
 

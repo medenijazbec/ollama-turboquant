@@ -40,7 +40,7 @@ func setupBackend(tb testing.TB, params ml.BackendParams) (ml.Backend, ml.Contex
 		b.Close()
 	})
 
-	return ctx
+	return b, ctx
 }
 
 func setup(tb testing.TB) ml.Context {

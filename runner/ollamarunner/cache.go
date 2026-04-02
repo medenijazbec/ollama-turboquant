@@ -47,7 +47,11 @@ type InputCache struct {
 	kvCachePathV              string
 	kvSymmetric               bool
 	kvAsymmetric              bool
+	requestedMode             string
+	effectiveMode             string
 	fallbackReason            string
+	fallbackApplied           bool
+	kOnlyFallback             bool
 	turboQuantPathKind        string
 	nativeTurboQuantActive    bool
 	referenceTurboQuantActive bool
@@ -57,6 +61,8 @@ type InputCache struct {
 	backendPackedVAvailable   bool
 	nativeBackendReady        bool
 	nativeBackendBlocker      string
+	faEnabled                 bool
+	faRequiredForVTurbo       bool
 	vTurboSupported           bool
 	tqBlockSize               int
 	tqLayoutKind              string
@@ -66,7 +72,7 @@ type InputCache struct {
 	tqTailPad                 int
 }
 
-func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
+func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend string, flashAttention ml.FlashAttentionType, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
 	numCtx := kvSize / int32(numSlots)
 
 	if int(numCtx) < batchSize {
@@ -95,6 +101,8 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	kvCachePathK := "dense-fallback"
 	kvCachePathV := "dense-fallback"
 	fallbackReason := ""
+	fallbackApplied := false
+	kOnlyFallback := false
 	turboQuantPathKind := "disabled"
 	nativeTurboQuantActive := false
 	referenceTurboQuantActive := false
@@ -104,6 +112,8 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	backendPackedVAvailable := false
 	nativeBackendReady := false
 	nativeBackendBlocker := ""
+	faEnabled := flashAttention == ml.FlashAttentionEnabled
+	faRequiredForVTurbo := false
 	vTurboSupported := normalizedKVCacheTypeV == "" || normalizedKVCacheTypeV == "f16"
 	tqBlockSize := 0
 	tqLayoutKind := ""
@@ -111,32 +121,26 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	tqGroupCount := 0
 	tqOriginalHeadDim := 0
 	tqTailPad := 0
-	if normalizedKVCacheTypeK != normalizedKVCacheTypeV {
-		fallbackReason = "asymmetric K/V cache modes requested but native backend ownership is not enabled in this branch; falling back to f16/f16"
-		kvCacheEffective = "f16"
-		kvCacheEffectiveK = "f16"
-		kvCacheEffectiveV = "f16"
-		normalizedKVCacheType = "f16"
-		normalizedKVCacheTypeK = "f16"
-		normalizedKVCacheTypeV = "f16"
-	}
 	if cache != nil {
+		support := backendTurboQuantSupport(model.Backend())
 		dtype := kvCacheTypeFromStr(normalizedKVCacheType)
 		dtypeK := kvCacheTypeFromStr(normalizedKVCacheTypeK)
 		dtypeV := kvCacheTypeFromStr(normalizedKVCacheTypeV)
 		kvCachePathK = resolveKVCachePath(model.Backend(), dtypeK, normalizedKVCacheBackend)
 		kvCachePathV = resolveKVCachePath(model.Backend(), dtypeV, normalizedKVCacheBackend)
-		// Implemented explicit asymmetric K/V resolution at cache setup instead of treating everything as symmetric; idea source: @TheTom.
-		// Preserved visible mixed K/V request handling so conservative asymmetric pairings remain measurable; idea source: @primoco.
-		// Added guarded fallback reporting for risky asymmetric pairings instead of silent degradation; idea source: @sjoerdmaessen.
-		if isTurboQuantKVType(normalizedKVCacheTypeV) && kvCachePathV == "dense-fallback" {
-			fallbackReason = "requested V turboquant path is not supported by the active backend; falling back to f16 on V"
-			normalizedKVCacheTypeV = "f16"
-			kvCacheEffectiveV = "f16"
-			dtypeV = ml.DTypeF16
-			kvCachePathV = "dense-fallback"
-			vTurboSupported = false
-		}
+		normalizedKVCacheTypeK, normalizedKVCacheTypeV, kvCacheEffectiveK, kvCacheEffectiveV, fallbackReason, fallbackApplied, kOnlyFallback, vTurboSupported, faRequiredForVTurbo = resolveTurboQuantFallback(
+			support,
+			normalizedKVCacheBackend,
+			faEnabled,
+			normalizedKVCacheTypeK,
+			normalizedKVCacheTypeV,
+			kvCachePathK,
+			kvCachePathV,
+		)
+		dtypeK = kvCacheTypeFromStr(normalizedKVCacheTypeK)
+		dtypeV = kvCacheTypeFromStr(normalizedKVCacheTypeV)
+		kvCachePathK = resolveKVCachePath(model.Backend(), dtypeK, normalizedKVCacheBackend)
+		kvCachePathV = resolveKVCachePath(model.Backend(), dtypeV, normalizedKVCacheBackend)
 		if isTurboQuantKVType(normalizedKVCacheTypeK) && kvCachePathK != "dense-fallback" {
 			kvAlgoResolvedK = turboquant.AlgorithmPaper
 		}
@@ -190,6 +194,18 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		if nativeBackendBlocker != "" && fallbackReason == "" {
 			fallbackReason = nativeBackendBlocker
 		}
+		if fallbackReason != "" {
+			slog.Warn("falling back from requested V-side turboquant mode",
+				"requested_k_type", requestedKVCacheTypeK,
+				"requested_v_type", requestedKVCacheTypeV,
+				"effective_k_type", kvCacheEffectiveK,
+				"effective_v_type", kvCacheEffectiveV,
+				"backend", normalizedKVCacheBackend,
+				"fa_enabled", faEnabled,
+				"fa_required_for_v_turbo", faRequiredForVTurbo,
+				"reason", fallbackReason,
+			)
+		}
 		if kvCachePathK == "" {
 			kvCachePathK = kvCachePath
 		}
@@ -225,6 +241,8 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 			kvCachePath = "mixed"
 		}
 	}
+	requestedMode := summarizeKVMode(requestedKVCacheTypeK, requestedKVCacheTypeV)
+	effectiveMode := summarizeKVMode(kvCacheEffectiveK, kvCacheEffectiveV)
 
 	return &InputCache{
 		numCtx:                    numCtx,
@@ -247,7 +265,11 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		kvCachePathV:              kvCachePathV,
 		kvSymmetric:               kvCacheEffectiveK == kvCacheEffectiveV,
 		kvAsymmetric:              kvCacheEffectiveK != kvCacheEffectiveV,
+		requestedMode:             requestedMode,
+		effectiveMode:             effectiveMode,
 		fallbackReason:            fallbackReason,
+		fallbackApplied:           fallbackApplied || requestedMode != effectiveMode,
+		kOnlyFallback:             kOnlyFallback,
 		turboQuantPathKind:        turboQuantPathKind,
 		nativeTurboQuantActive:    nativeTurboQuantActive,
 		referenceTurboQuantActive: referenceTurboQuantActive,
@@ -257,6 +279,8 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		backendPackedVAvailable:   backendPackedVAvailable,
 		nativeBackendReady:        nativeBackendReady,
 		nativeBackendBlocker:      nativeBackendBlocker,
+		faEnabled:                 faEnabled,
+		faRequiredForVTurbo:       faRequiredForVTurbo,
 		vTurboSupported:           vTurboSupported,
 		tqBlockSize:               tqBlockSize,
 		tqLayoutKind:              tqLayoutKind,
@@ -358,6 +382,79 @@ func isTurboQuantKVType(s string) bool {
 	}
 }
 
+func requiresFlashAttentionForVTurbo(support ml.TurboQuantSupport, requestedV ml.DType) bool {
+	if requestedV != ml.DTypeTQ25 && requestedV != ml.DTypeTQ35 {
+		return false
+	}
+	return support.RequiresFlashAttention
+}
+
+func resolveTurboQuantFallback(support ml.TurboQuantSupport, requestedBackend string, faEnabled bool, requestedKType, requestedVType, pathK, pathV string) (effectiveKType, effectiveVType, resolvedKType, resolvedVType string, fallbackReason string, fallbackApplied bool, kOnlyFallback bool, vTurboSupported bool, faRequiredForVTurbo bool) {
+	effectiveKType = requestedKType
+	effectiveVType = requestedVType
+	resolvedKType = requestedKType
+	resolvedVType = requestedVType
+	vTurboSupported = !isTurboQuantKVType(requestedVType)
+	faRequiredForVTurbo = requiresFlashAttentionForVTurbo(support, kvCacheTypeFromStr(requestedVType))
+
+	kSupported := !isTurboQuantKVType(requestedKType) || pathK != "dense-fallback"
+	vPathSupported := !isTurboQuantKVType(requestedVType) || pathV != "dense-fallback"
+
+	if !isTurboQuantKVType(requestedVType) {
+		return
+	}
+
+	// Implemented V-side TurboQuant gating on Flash Attention availability for the active backend; idea source: @Madreag.
+	if faRequiredForVTurbo && !faEnabled {
+		fallbackApplied = true
+		fallbackReason = "requested V turboquant requires Flash Attention on the active backend; falling back to f16 on V"
+		effectiveVType = "f16"
+		resolvedVType = "f16"
+		vTurboSupported = false
+		if kSupported && isTurboQuantKVType(requestedKType) {
+			// Implemented explicit K-only fallback reporting so unsupported V turbo requests do not degrade ambiguously; idea source: @TheTom.
+			kOnlyFallback = true
+			return
+		}
+		effectiveKType = "f16"
+		resolvedKType = "f16"
+		return
+	}
+
+	if !vPathSupported {
+		fallbackApplied = true
+		fallbackReason = fmt.Sprintf("requested V turboquant path is not supported on backend=%s path=%s; falling back to f16 on V", firstNonEmpty(requestedBackend, "cpu"), pathV)
+		effectiveVType = "f16"
+		resolvedVType = "f16"
+		vTurboSupported = false
+		if kSupported && isTurboQuantKVType(requestedKType) {
+			kOnlyFallback = true
+			return
+		}
+		effectiveKType = "f16"
+		resolvedKType = "f16"
+		return
+	}
+
+	vTurboSupported = true
+	return
+}
+
+func summarizeKVMode(kType, vType string) string {
+	kType = strings.TrimSpace(kType)
+	if kType == "" {
+		kType = "f16"
+	}
+	vType = strings.TrimSpace(vType)
+	if vType == "" {
+		vType = "f16"
+	}
+	if kType == vType {
+		return kType
+	}
+	return fmt.Sprintf("k=%s,v=%s", kType, vType)
+}
+
 type KVCacheRuntimeInfo struct {
 	Requested                 string
 	Effective                 string
@@ -365,6 +462,8 @@ type KVCacheRuntimeInfo struct {
 	RequestedV                string
 	EffectiveK                string
 	EffectiveV                string
+	RequestedMode             string
+	EffectiveMode             string
 	Algorithm                 string
 	AlgorithmK                string
 	AlgorithmV                string
@@ -375,6 +474,8 @@ type KVCacheRuntimeInfo struct {
 	Symmetric                 bool
 	Asymmetric                bool
 	FallbackReason            string
+	FallbackApplied           bool
+	KOnlyFallback             bool
 	TurboQuantPathKind        string
 	NativeTurboQuantActive    bool
 	ReferenceTurboQuantActive bool
@@ -384,6 +485,8 @@ type KVCacheRuntimeInfo struct {
 	BackendPackedVAvailable   bool
 	NativeBackendReady        bool
 	NativeBackendBlocker      string
+	FAEnabled                 bool
+	FARequiredForVTurbo       bool
 	VTurboSupported           bool
 	TQBlockSize               int
 	TQLayoutKind              string
@@ -404,6 +507,8 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		RequestedV:                c.kvCacheRequestedV,
 		EffectiveK:                c.kvCacheEffectiveK,
 		EffectiveV:                c.kvCacheEffectiveV,
+		RequestedMode:             c.requestedMode,
+		EffectiveMode:             c.effectiveMode,
 		Algorithm:                 c.kvAlgoResolved,
 		AlgorithmK:                c.kvAlgoResolvedK,
 		AlgorithmV:                c.kvAlgoResolvedV,
@@ -414,6 +519,8 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		Symmetric:                 c.kvSymmetric,
 		Asymmetric:                c.kvAsymmetric,
 		FallbackReason:            c.fallbackReason,
+		FallbackApplied:           c.fallbackApplied,
+		KOnlyFallback:             c.kOnlyFallback,
 		TurboQuantPathKind:        c.turboQuantPathKind,
 		NativeTurboQuantActive:    c.nativeTurboQuantActive,
 		ReferenceTurboQuantActive: c.referenceTurboQuantActive,
@@ -423,6 +530,8 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		BackendPackedVAvailable:   c.backendPackedVAvailable,
 		NativeBackendReady:        c.nativeBackendReady,
 		NativeBackendBlocker:      c.nativeBackendBlocker,
+		FAEnabled:                 c.faEnabled,
+		FARequiredForVTurbo:       c.faRequiredForVTurbo,
 		VTurboSupported:           c.vTurboSupported,
 		TQBlockSize:               c.tqBlockSize,
 		TQLayoutKind:              c.tqLayoutKind,

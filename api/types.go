@@ -578,9 +578,11 @@ type Metrics struct {
 	KVCacheEffective          string        `json:"kv_cache_effective,omitempty"`
 	KVCacheRequestedK         string        `json:"kv_cache_requested_k,omitempty"`
 	KVCacheRequestedV         string        `json:"kv_cache_requested_v,omitempty"`
+	RequestedMode             string        `json:"requested_mode,omitempty"`
 	ResolvedKVCacheType       string        `json:"resolved_kv_cache_type,omitempty"`
 	ResolvedKVCacheTypeK      string        `json:"resolved_kv_cache_type_k,omitempty"`
 	ResolvedKVCacheTypeV      string        `json:"resolved_kv_cache_type_v,omitempty"`
+	EffectiveMode             string        `json:"effective_mode,omitempty"`
 	KVAlgoResolved            string        `json:"kv_algo_resolved,omitempty"`
 	KVAlgoResolvedK           string        `json:"kv_algo_resolved_k,omitempty"`
 	KVAlgoResolvedV           string        `json:"kv_algo_resolved_v,omitempty"`
@@ -591,6 +593,8 @@ type Metrics struct {
 	KVSymmetric               bool          `json:"kv_symmetric,omitempty"`
 	KVAsymmetric              bool          `json:"kv_asymmetric,omitempty"`
 	FallbackReason            string        `json:"fallback_reason,omitempty"`
+	FallbackApplied           bool          `json:"fallback_applied,omitempty"`
+	KOnlyFallback             bool          `json:"k_only_fallback,omitempty"`
 	TurboQuantPathKind        string        `json:"turboquant_path_kind,omitempty"`
 	NativeTurboQuantActive    bool          `json:"native_turboquant_active,omitempty"`
 	ReferenceTurboQuantActive bool          `json:"reference_turboquant_active,omitempty"`
@@ -601,6 +605,7 @@ type Metrics struct {
 	NativeBackendReady        bool          `json:"native_backend_ready,omitempty"`
 	NativeBackendBlocker      string        `json:"native_backend_blocker,omitempty"`
 	FAEnabled                 bool          `json:"fa_enabled,omitempty"`
+	FARequiredForVTurbo       bool          `json:"fa_required_for_v_turbo,omitempty"`
 	VTurboSupported           bool          `json:"v_turbo_supported,omitempty"`
 	TQLayoutKind              string        `json:"tq_layout_kind,omitempty"`
 	TQLayoutVersion           int           `json:"tq_layout_version,omitempty"`

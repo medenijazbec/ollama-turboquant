@@ -104,6 +104,8 @@ func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText
 		KVModeRequested:    cell.KVMode,
 		KVModeRequestedK:   cell.KVMode,
 		KVModeRequestedV:   cell.KVMode,
+		RequestedMode:      cell.KVMode,
+		EffectiveMode:      cell.KVMode,
 		KVBackendRequested: requestedKVBackend(cell.KVMode),
 		KVAlgoResolved:     firstNonEmpty(kvAlgoForRequestedMode(cell.KVMode), "unknown"),
 		KVPath:             "unknown",
@@ -131,6 +133,8 @@ func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText
 		KVModeRequested:    row.KVModeRequested,
 		KVModeRequestedK:   row.KVModeRequestedK,
 		KVModeRequestedV:   row.KVModeRequestedV,
+		RequestedMode:      row.RequestedMode,
+		EffectiveMode:      row.EffectiveMode,
 		KVAlgoResolved:     row.KVAlgoResolved,
 		KVBackendRequested: row.KVBackendRequested,
 		KVPath:             row.KVPath,
@@ -493,6 +497,8 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 	row.KVModeResolved = firstNonEmpty(finalMetrics.ResolvedKVCacheType, finalMetrics.KVCacheEffective, row.KVModeRequested)
 	row.KVModeResolvedK = firstNonEmpty(finalMetrics.ResolvedKVCacheTypeK, row.KVModeRequestedK)
 	row.KVModeResolvedV = firstNonEmpty(finalMetrics.ResolvedKVCacheTypeV, row.KVModeRequestedV)
+	row.RequestedMode = firstNonEmpty(finalMetrics.RequestedMode, summarizeRequestedOrEffectiveMode(row.KVModeRequestedK, row.KVModeRequestedV))
+	row.EffectiveMode = firstNonEmpty(finalMetrics.EffectiveMode, summarizeRequestedOrEffectiveMode(row.KVModeResolvedK, row.KVModeResolvedV), row.KVModeResolved)
 	row.KVAlgoResolved = firstNonEmpty(finalMetrics.KVAlgoResolved, kvAlgoForRequestedMode(row.KVModeResolved))
 	row.KVAlgoResolvedK = firstNonEmpty(finalMetrics.KVAlgoResolvedK, row.KVAlgoResolved)
 	row.KVAlgoResolvedV = firstNonEmpty(finalMetrics.KVAlgoResolvedV, row.KVAlgoResolved)
@@ -501,11 +507,14 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 	row.KVPathV = firstNonEmpty(finalMetrics.KVCachePathV, row.KVPath)
 	row.KVSymmetric = finalMetrics.KVSymmetric
 	row.KVAsymmetric = finalMetrics.KVAsymmetric
+	row.FallbackApplied = finalMetrics.FallbackApplied
+	row.KOnlyFallback = finalMetrics.KOnlyFallback
 	row.FallbackReason = finalMetrics.FallbackReason
 	row.TurboQuantPathKind = finalMetrics.TurboQuantPathKind
 	row.NativeTurboQuantActive = finalMetrics.NativeTurboQuantActive
 	row.ReferenceTurboQuantActive = finalMetrics.ReferenceTurboQuantActive
 	row.FAEnabled = finalMetrics.FAEnabled
+	row.FARequiredForVTurbo = finalMetrics.FARequiredForVTurbo
 	row.VTurboSupported = finalMetrics.VTurboSupported
 	row.TQBlockSize = finalMetrics.TQBlockSize
 	row.PromptEvalCount = finalMetrics.PromptEvalCount
@@ -522,7 +531,7 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 	if row.KVPath == "" {
 		row.KVPath = "unknown"
 	}
-	if err := validateResolvedKVMode(row.KVModeRequested, row.KVModeResolved, row.KVAlgoResolved, row.KVPath); err != nil {
+	if err := validateResolvedKVModes(row); err != nil {
 		row.Status = statusFailed
 		row.Success = boolPtr(false)
 		row.Error = err.Error()
@@ -565,6 +574,8 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		KVModeRequested:           rows[0].KVModeRequested,
 		KVModeRequestedK:          rows[0].KVModeRequestedK,
 		KVModeRequestedV:          rows[0].KVModeRequestedV,
+		RequestedMode:             rows[0].RequestedMode,
+		EffectiveMode:             rows[0].EffectiveMode,
 		KVBackendRequested:        rows[0].KVBackendRequested,
 		KVAlgoResolved:            rows[0].KVAlgoResolved,
 		KVAlgoResolvedK:           rows[0].KVAlgoResolvedK,
@@ -573,11 +584,14 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		KVPathV:                   rows[0].KVPathV,
 		KVSymmetric:               rows[0].KVSymmetric,
 		KVAsymmetric:              rows[0].KVAsymmetric,
+		FallbackApplied:           rows[0].FallbackApplied,
+		KOnlyFallback:             rows[0].KOnlyFallback,
 		FallbackReason:            rows[0].FallbackReason,
 		TurboQuantPathKind:        rows[0].TurboQuantPathKind,
 		NativeTurboQuantActive:    rows[0].NativeTurboQuantActive,
 		ReferenceTurboQuantActive: rows[0].ReferenceTurboQuantActive,
 		FAEnabled:                 rows[0].FAEnabled,
+		FARequiredForVTurbo:       rows[0].FARequiredForVTurbo,
 		VTurboSupported:           rows[0].VTurboSupported,
 		TQBlockSize:               rows[0].TQBlockSize,
 		Workload:                  rows[0].Workload,
@@ -609,6 +623,8 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 	var kvResolved []string
 	var kvResolvedK []string
 	var kvResolvedV []string
+	var requestedModes []string
+	var effectiveModes []string
 	var kvAlgorithms []string
 	var kvAlgorithmsK []string
 	var kvAlgorithmsV []string
@@ -630,6 +646,8 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		kvResolved = append(kvResolved, row.KVModeResolved)
 		kvResolvedK = append(kvResolvedK, row.KVModeResolvedK)
 		kvResolvedV = append(kvResolvedV, row.KVModeResolvedV)
+		requestedModes = append(requestedModes, row.RequestedMode)
+		effectiveModes = append(effectiveModes, row.EffectiveMode)
 		kvAlgorithms = append(kvAlgorithms, row.KVAlgoResolved)
 		kvAlgorithmsK = append(kvAlgorithmsK, row.KVAlgoResolvedK)
 		kvAlgorithmsV = append(kvAlgorithmsV, row.KVAlgoResolvedV)
@@ -671,6 +689,8 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 	agg.KVModeResolved = uniqueOrMixed(kvResolved)
 	agg.KVModeResolvedK = uniqueOrMixed(kvResolvedK)
 	agg.KVModeResolvedV = uniqueOrMixed(kvResolvedV)
+	agg.RequestedMode = uniqueOrMixed(requestedModes)
+	agg.EffectiveMode = uniqueOrMixed(effectiveModes)
 	agg.KVAlgoResolved = uniqueOrMixed(kvAlgorithms)
 	agg.KVAlgoResolvedK = uniqueOrMixed(kvAlgorithmsK)
 	agg.KVAlgoResolvedV = uniqueOrMixed(kvAlgorithmsV)
@@ -719,10 +739,27 @@ func uniqueOrMixed(values []string) string {
 	return first
 }
 
-func validateResolvedKVMode(requested, resolved, algo, path string) error {
+func validateResolvedKVModes(row workerResult) error {
+	requested := firstNonEmpty(row.KVModeRequested, "f16")
+	resolved := firstNonEmpty(row.KVModeResolved, "")
 	requested = firstNonEmpty(requested, "f16")
-	resolved = firstNonEmpty(resolved, "")
 	if requested == "f16" {
+		return nil
+	}
+	if isTurboQuantMode(row.KVModeRequestedV) && !strings.EqualFold(firstNonEmpty(row.KVModeRequestedV, "f16"), firstNonEmpty(row.KVModeResolvedV, "f16")) {
+		if !row.FallbackApplied {
+			return errors.New("requested V turboquant downgraded without fallback metadata")
+		}
+		if strings.TrimSpace(row.FallbackReason) == "" {
+			return errors.New("requested V turboquant downgraded without fallback reason")
+		}
+		expectedKOnly := isTurboQuantMode(row.KVModeResolvedK) && !isTurboQuantMode(row.KVModeResolvedV)
+		if row.KOnlyFallback != expectedKOnly {
+			return fmt.Errorf("requested V turboquant fallback reported k_only_fallback=%t, want %t", row.KOnlyFallback, expectedKOnly)
+		}
+		if row.FARequiredForVTurbo && !row.FAEnabled && row.VTurboSupported {
+			return errors.New("requested V turboquant reported supported despite Flash Attention gate")
+		}
 		return nil
 	}
 	if resolved == "" || resolved == "f16" {
@@ -731,13 +768,37 @@ func validateResolvedKVMode(requested, resolved, algo, path string) error {
 	if resolved != requested {
 		return fmt.Errorf("requested kv mode %s resolved as %s", requested, resolved)
 	}
-	if strings.HasPrefix(requested, "tq") && algo != turboquant.AlgorithmPaper {
-		return fmt.Errorf("requested kv mode %s resolved with algorithm %s", requested, firstNonEmpty(algo, "unknown"))
+	if isTurboQuantMode(row.KVModeRequestedV) {
+		if !row.VTurboSupported {
+			return errors.New("requested V turboquant resolved without V-side support")
+		}
+		if row.FARequiredForVTurbo && !row.FAEnabled {
+			return errors.New("requested V turboquant resolved without Flash Attention")
+		}
 	}
-	if strings.TrimSpace(path) == "" || path == "unknown" {
+	if strings.HasPrefix(requested, "tq") && row.KVAlgoResolved != turboquant.AlgorithmPaper {
+		return fmt.Errorf("requested kv mode %s resolved with algorithm %s", requested, firstNonEmpty(row.KVAlgoResolved, "unknown"))
+	}
+	if strings.TrimSpace(row.KVPath) == "" || row.KVPath == "unknown" {
 		return errors.New("requested kv mode resolved without runtime path metadata")
 	}
+	if row.RequestedMode != "" && row.EffectiveMode != "" && row.RequestedMode != row.EffectiveMode && !row.FallbackApplied {
+		return errors.New("requested and effective kv modes differ without fallback metadata")
+	}
 	return nil
+}
+
+func summarizeRequestedOrEffectiveMode(kType, vType string) string {
+	kType = firstNonEmpty(strings.TrimSpace(kType), "f16")
+	vType = firstNonEmpty(strings.TrimSpace(vType), "f16")
+	if strings.EqualFold(kType, vType) {
+		return kType
+	}
+	return fmt.Sprintf("k=%s,v=%s", kType, vType)
+}
+
+func isTurboQuantMode(mode string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(mode)), "tq")
 }
 
 func kvAlgoForRequestedMode(kvMode string) string {

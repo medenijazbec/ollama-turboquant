@@ -36,7 +36,7 @@ func writeCSV(path string, rows []epochAggregate) error {
 	defer w.Flush()
 
 	header := []string{
-		"host", "host_label", "server_version", "model", "quant", "kv_mode_requested", "kv_mode_requested_k", "kv_mode_requested_v", "kv_mode_resolved", "kv_mode_resolved_k", "kv_mode_resolved_v", "kv_algo_resolved", "kv_algo_resolved_k", "kv_algo_resolved_v", "kv_path", "kv_path_k", "kv_path_v", "kv_symmetric", "kv_asymmetric", "fallback_reason", "turboquant_path_kind", "native_turboquant_active", "reference_turboquant_active", "fa_enabled", "v_turbo_supported", "tq_block_size",
+		"host", "host_label", "server_version", "model", "quant", "kv_mode_requested", "kv_mode_requested_k", "kv_mode_requested_v", "kv_mode_resolved", "kv_mode_resolved_k", "kv_mode_resolved_v", "requested_mode", "effective_mode", "kv_algo_resolved", "kv_algo_resolved_k", "kv_algo_resolved_v", "kv_path", "kv_path_k", "kv_path_v", "kv_symmetric", "kv_asymmetric", "fallback_applied", "k_only_fallback", "fallback_reason", "turboquant_path_kind", "native_turboquant_active", "reference_turboquant_active", "fa_enabled", "fa_required_for_v_turbo", "v_turbo_supported", "tq_block_size",
 		"workload", "num_ctx", "concurrency", "prompt_tokens_target", "prompt_eval_count", "max_tokens", "eval_count",
 		"generated_tokens", "live_kv_tokens_total", "ctx_x_conc", "epoch", "warmup", "prefill_tps", "decode_tps",
 		"ttft_ms_mean", "ttft_ms_p95", "load_ms", "total_ms", "wall_ms", "peak_vram_bytes", "avg_gpu_util", "peak_gpu_util",
@@ -61,6 +61,8 @@ func writeCSV(path string, rows []epochAggregate) error {
 			row.KVModeResolved,
 			row.KVModeResolvedK,
 			row.KVModeResolvedV,
+			row.RequestedMode,
+			row.EffectiveMode,
 			row.KVAlgoResolved,
 			row.KVAlgoResolvedK,
 			row.KVAlgoResolvedV,
@@ -69,11 +71,14 @@ func writeCSV(path string, rows []epochAggregate) error {
 			row.KVPathV,
 			fmt.Sprintf("%t", row.KVSymmetric),
 			fmt.Sprintf("%t", row.KVAsymmetric),
+			fmt.Sprintf("%t", row.FallbackApplied),
+			fmt.Sprintf("%t", row.KOnlyFallback),
 			row.FallbackReason,
 			row.TurboQuantPathKind,
 			fmt.Sprintf("%t", row.NativeTurboQuantActive),
 			fmt.Sprintf("%t", row.ReferenceTurboQuantActive),
 			fmt.Sprintf("%t", row.FAEnabled),
+			fmt.Sprintf("%t", row.FARequiredForVTurbo),
 			fmt.Sprintf("%t", row.VTurboSupported),
 			fmt.Sprintf("%d", row.TQBlockSize),
 			row.Workload,
@@ -134,13 +139,13 @@ func writeSummary(path string, rows []epochAggregate, staircases []staircaseReco
 		if _, ok := sameRuntimeHosts[row.HostLabel]; !ok {
 			return false
 		}
-		return row.KVModeRequested == "f16" || strings.HasPrefix(row.KVModeRequested, "tq")
+		return row.EffectiveMode == "f16" || strings.HasPrefix(row.EffectiveMode, "tq")
 	})
 	writeSameRuntimeSummary(&b, rows, sameRuntimeHosts)
 
 	b.WriteString("\n# Product Claim vs Baseline\n\n")
 	writeSupportCounts(&b, rows, func(row epochAggregate) bool {
-		return (row.HostLabel == "baseline" && row.KVModeRequested == "f16") || (row.HostLabel == "turbo" && row.KVModeRequested == "tq35")
+		return (row.HostLabel == "baseline" && row.EffectiveMode == "f16") || (row.HostLabel == "turbo" && row.EffectiveMode == "tq35")
 	})
 	writeProductSummary(&b, rows)
 
@@ -190,7 +195,7 @@ func writeRegressionSummary(b *strings.Builder, rows []epochAggregate) {
 		))
 	}
 
-	for _, pair := range pairedGroups(grouped, func(group summaryGroup) bool { return group.KVModeRequested == "f16" }) {
+	for _, pair := range pairedGroups(grouped, func(group summaryGroup) bool { return group.EffectiveMode == "f16" }) {
 		if pair.Baseline.HostLabel == "" || pair.Turbo.HostLabel == "" {
 			continue
 		}
@@ -211,7 +216,10 @@ func writeSameRuntimeSummary(b *strings.Builder, rows []epochAggregate, sameRunt
 		if _, ok := sameRuntimeHosts[row.HostLabel]; !ok {
 			return false
 		}
-		return !row.Warmup && row.Status == statusOK && row.FullGPUResidency && !row.Spilled && (row.KVModeRequested == "f16" || strings.HasPrefix(row.KVModeRequested, "tq"))
+		if row.FallbackApplied {
+			return false
+		}
+		return !row.Warmup && row.Status == statusOK && row.FullGPUResidency && !row.Spilled && (row.EffectiveMode == "f16" || strings.HasPrefix(row.EffectiveMode, "tq"))
 	})
 	if len(grouped) == 0 {
 		b.WriteString("- no same-runtime full-GPU rows available\n")
@@ -249,10 +257,10 @@ func writeSameRuntimeSummary(b *strings.Builder, rows []epochAggregate, sameRunt
 
 func writeProductSummary(b *strings.Builder, rows []epochAggregate) {
 	grouped := summarizeRows(rows, func(row epochAggregate) bool {
-		if row.Warmup || row.Status != statusOK || !row.FullGPUResidency || row.Spilled {
+		if row.Warmup || row.Status != statusOK || !row.FullGPUResidency || row.Spilled || row.FallbackApplied {
 			return false
 		}
-		return (row.HostLabel == "baseline" && row.KVModeRequested == "f16") || (row.HostLabel == "turbo" && row.KVModeRequested == "tq35")
+		return (row.HostLabel == "baseline" && row.EffectiveMode == "f16") || (row.HostLabel == "turbo" && row.EffectiveMode == "tq35")
 	})
 	if len(grouped) == 0 {
 		b.WriteString("- no baseline-vs-fork product rows available\n")
@@ -260,7 +268,7 @@ func writeProductSummary(b *strings.Builder, rows []epochAggregate) {
 	}
 
 	for _, pair := range pairedGroups(grouped, func(group summaryGroup) bool {
-		return (group.HostLabel == "baseline" && group.KVModeRequested == "f16") || (group.HostLabel == "turbo" && group.KVModeRequested == "tq35")
+		return (group.HostLabel == "baseline" && group.EffectiveMode == "f16") || (group.HostLabel == "turbo" && group.EffectiveMode == "tq35")
 	}) {
 		if pair.Baseline.HostLabel == "" || pair.Turbo.HostLabel == "" {
 			continue
@@ -340,6 +348,7 @@ type summaryGroup struct {
 	Model             string
 	Quant             string
 	KVModeRequested   string
+	EffectiveMode     string
 	Workload          string
 	NumCtx            int
 	Concurrency       int
@@ -373,6 +382,7 @@ func summarizeRows(rows []epochAggregate, include func(epochAggregate) bool) []s
 		model       string
 		quant       string
 		kvMode      string
+		effective   string
 		workload    string
 		numCtx      int
 		concurrency int
@@ -393,7 +403,7 @@ func summarizeRows(rows []epochAggregate, include func(epochAggregate) bool) []s
 		if !include(row) {
 			continue
 		}
-		k := key{row.Host, row.HostLabel, row.ServerVersion, row.Model, row.Quant, row.KVModeRequested, row.Workload, row.NumCtx, row.Concurrency}
+		k := key{row.Host, row.HostLabel, row.ServerVersion, row.Model, row.Quant, row.KVModeRequested, row.EffectiveMode, row.Workload, row.NumCtx, row.Concurrency}
 		if m[k] == nil {
 			m[k] = &acc{}
 		}
@@ -423,6 +433,7 @@ func summarizeRows(rows []epochAggregate, include func(epochAggregate) bool) []s
 			Model:             k.model,
 			Quant:             k.quant,
 			KVModeRequested:   k.kvMode,
+			EffectiveMode:     firstNonEmpty(k.effective, k.kvMode),
 			Workload:          k.workload,
 			NumCtx:            k.numCtx,
 			Concurrency:       k.concurrency,
@@ -493,7 +504,7 @@ func groupedKeys(groups []summaryGroup) []summaryKey {
 
 func findGroup(groups []summaryGroup, key summaryKey, kvMode string) (summaryGroup, bool) {
 	for _, group := range groups {
-		if group.HostLabel == key.HostLabel && group.Workload == key.Workload && group.NumCtx == key.NumCtx && group.Concurrency == key.Concurrency && group.KVModeRequested == kvMode {
+		if group.HostLabel == key.HostLabel && group.Workload == key.Workload && group.NumCtx == key.NumCtx && group.Concurrency == key.Concurrency && group.EffectiveMode == kvMode {
 			return group, true
 		}
 	}
@@ -517,9 +528,9 @@ func pairedGroups(groups []summaryGroup, include func(summaryGroup) bool) []comp
 			pairs[key] = &comparisonPair{}
 		}
 		switch {
-		case group.HostLabel == "baseline" && group.KVModeRequested == "f16":
+		case group.HostLabel == "baseline" && group.EffectiveMode == "f16":
 			pairs[key].Baseline = group
-		case group.HostLabel == "turbo" && (group.KVModeRequested == "f16" || group.KVModeRequested == "tq35"):
+		case group.HostLabel == "turbo" && (group.EffectiveMode == "f16" || group.EffectiveMode == "tq35"):
 			pairs[key].Turbo = group
 		}
 	}

@@ -124,6 +124,8 @@ type workerResult struct {
 	KVModeRequestedV          string       `json:"kv_mode_requested_v,omitempty"`
 	KVModeResolvedK           string       `json:"kv_mode_resolved_k,omitempty"`
 	KVModeResolvedV           string       `json:"kv_mode_resolved_v,omitempty"`
+	RequestedMode             string       `json:"requested_mode,omitempty"`
+	EffectiveMode             string       `json:"effective_mode,omitempty"`
 	KVAlgoResolved            string       `json:"kv_algo_resolved,omitempty"`
 	KVAlgoResolvedK           string       `json:"kv_algo_resolved_k,omitempty"`
 	KVAlgoResolvedV           string       `json:"kv_algo_resolved_v,omitempty"`
@@ -133,11 +135,14 @@ type workerResult struct {
 	KVPathV                   string       `json:"kv_path_v,omitempty"`
 	KVSymmetric               bool         `json:"kv_symmetric"`
 	KVAsymmetric              bool         `json:"kv_asymmetric"`
+	FallbackApplied           bool         `json:"fallback_applied"`
+	KOnlyFallback             bool         `json:"k_only_fallback"`
 	FallbackReason            string       `json:"fallback_reason,omitempty"`
 	TurboQuantPathKind        string       `json:"turboquant_path_kind,omitempty"`
 	NativeTurboQuantActive    bool         `json:"native_turboquant_active"`
 	ReferenceTurboQuantActive bool         `json:"reference_turboquant_active"`
 	FAEnabled                 bool         `json:"fa_enabled"`
+	FARequiredForVTurbo       bool         `json:"fa_required_for_v_turbo"`
 	VTurboSupported           bool         `json:"v_turbo_supported"`
 	TQBlockSize               int          `json:"tq_block_size,omitempty"`
 	Workload                  string       `json:"workload"`
@@ -196,6 +201,8 @@ type epochAggregate struct {
 	KVModeRequestedV          string
 	KVModeResolvedK           string
 	KVModeResolvedV           string
+	RequestedMode             string
+	EffectiveMode             string
 	KVAlgoResolved            string
 	KVAlgoResolvedK           string
 	KVAlgoResolvedV           string
@@ -205,11 +212,14 @@ type epochAggregate struct {
 	KVPathV                   string
 	KVSymmetric               bool
 	KVAsymmetric              bool
+	FallbackApplied           bool
+	KOnlyFallback             bool
 	FallbackReason            string
 	TurboQuantPathKind        string
 	NativeTurboQuantActive    bool
 	ReferenceTurboQuantActive bool
 	FAEnabled                 bool
+	FARequiredForVTurbo       bool
 	VTurboSupported           bool
 	TQBlockSize               int
 	Workload                  string
