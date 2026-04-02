@@ -1765,6 +1765,14 @@ type CompletionResponse struct {
 	FAEnabled                 bool          `json:"fa_enabled,omitempty"`
 	FARequiredForVTurbo       bool          `json:"fa_required_for_v_turbo,omitempty"`
 	VTurboSupported           bool          `json:"v_turbo_supported,omitempty"`
+	DetectedHeadDim           int           `json:"detected_head_dim,omitempty"`
+	HeadDimSource             string        `json:"head_dim_source,omitempty"`
+	ArchitectureClass         string        `json:"architecture_class,omitempty"`
+	SupportTier               string        `json:"support_tier,omitempty"`
+	SupportReason             string        `json:"support_reason,omitempty"`
+	UnsupportedReason         string        `json:"unsupported_reason,omitempty"`
+	HybridKVArchitecture      bool          `json:"hybrid_kv_architecture,omitempty"`
+	NativeTurboQuantAllowed   bool          `json:"native_turboquant_allowed,omitempty"`
 	TQBlockSize               int           `json:"tq_block_size,omitempty"`
 	TQLayoutKind              string        `json:"tq_layout_kind,omitempty"`
 	TQLayoutVersion           int           `json:"tq_layout_version,omitempty"`

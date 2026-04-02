@@ -64,6 +64,14 @@ type InputCache struct {
 	faEnabled                 bool
 	faRequiredForVTurbo       bool
 	vTurboSupported           bool
+	detectedHeadDim           int
+	headDimSource             string
+	architectureClass         string
+	supportTier               string
+	supportReason             string
+	unsupportedReason         string
+	hybridKVArchitecture      bool
+	nativeTurboQuantAllowed   bool
 	tqBlockSize               int
 	tqLayoutKind              string
 	tqLayoutVersion           int
@@ -115,6 +123,15 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	faEnabled := flashAttention == ml.FlashAttentionEnabled
 	faRequiredForVTurbo := false
 	vTurboSupported := normalizedKVCacheTypeV == "" || normalizedKVCacheTypeV == "f16"
+	support := detectTurboQuantModelSupport(model)
+	detectedHeadDim := support.DetectedHeadDim
+	headDimSource := string(support.HeadDimSource)
+	architectureClass := support.ArchitectureClass
+	supportTier := string(support.SupportTier)
+	supportReason := support.SupportReason
+	unsupportedReason := support.UnsupportedReason
+	hybridKVArchitecture := support.HybridKVArchitecture
+	nativeTurboQuantAllowed := support.NativeTurboQuantAllowed
 	tqBlockSize := 0
 	tqLayoutKind := ""
 	tqLayoutVersion := 0
@@ -122,14 +139,14 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	tqOriginalHeadDim := 0
 	tqTailPad := 0
 	if cache != nil {
-		support := backendTurboQuantSupport(model.Backend())
+		backendSupport := backendTurboQuantSupport(model.Backend())
 		dtype := kvCacheTypeFromStr(normalizedKVCacheType)
 		dtypeK := kvCacheTypeFromStr(normalizedKVCacheTypeK)
 		dtypeV := kvCacheTypeFromStr(normalizedKVCacheTypeV)
 		kvCachePathK = resolveKVCachePath(model.Backend(), dtypeK, normalizedKVCacheBackend)
 		kvCachePathV = resolveKVCachePath(model.Backend(), dtypeV, normalizedKVCacheBackend)
 		normalizedKVCacheTypeK, normalizedKVCacheTypeV, kvCacheEffectiveK, kvCacheEffectiveV, fallbackReason, fallbackApplied, kOnlyFallback, vTurboSupported, faRequiredForVTurbo = resolveTurboQuantFallback(
-			support,
+			backendSupport,
 			normalizedKVCacheBackend,
 			faEnabled,
 			normalizedKVCacheTypeK,
@@ -191,8 +208,52 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 				turboQuantPathKind = status.PathKind
 			}
 		}
+		if !nativeTurboQuantAllowed {
+			nativeBackendReady = false
+			if nativeBackendBlocker == "" {
+				nativeBackendBlocker = formatNativeSupportFallbackReason(support, referenceTurboQuantActive)
+			}
+		}
 		if nativeBackendBlocker != "" && fallbackReason == "" {
 			fallbackReason = nativeBackendBlocker
+		}
+		nativeFallbackReason := ""
+		if !nativeTurboQuantAllowed && (turboQuantPathKind == "native_grouped_scaffold" || turboQuantPathKind == "native_backend") {
+			nativeFallbackReason = formatNativeSupportFallbackReason(support, referenceTurboQuantActive)
+			if referenceTurboQuantActive {
+				turboQuantPathKind = "reference_wrapper"
+				nativeTurboQuantActive = false
+				nativeBackendReady = false
+				nativeBackendBlocker = nativeFallbackReason
+			} else {
+				if isTurboQuantKVType(kvCacheEffectiveK) {
+					kvCacheEffectiveK = "f16"
+					kvAlgoResolvedK = ""
+					kvCachePathK = "dense-fallback"
+				}
+				if isTurboQuantKVType(kvCacheEffectiveV) {
+					kvCacheEffectiveV = "f16"
+					kvAlgoResolvedV = ""
+					kvCachePathV = "dense-fallback"
+					vTurboSupported = false
+				}
+				if kvCacheEffectiveK == kvCacheEffectiveV {
+					kvCacheEffective = kvCacheEffectiveK
+				} else {
+					kvCacheEffective = "mixed"
+				}
+				turboQuantPathKind = "disabled"
+				nativeTurboQuantActive = false
+				referenceTurboQuantActive = false
+				nativeBackendReady = false
+				nativeBackendBlocker = nativeFallbackReason
+			}
+			fallbackApplied = true
+			if fallbackReason == "" {
+				fallbackReason = nativeFallbackReason
+			} else if !strings.Contains(fallbackReason, nativeFallbackReason) {
+				fallbackReason = fallbackReason + "; " + nativeFallbackReason
+			}
 		}
 		if fallbackReason != "" {
 			slog.Warn("falling back from requested V-side turboquant mode",
@@ -206,6 +267,20 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 				"reason", fallbackReason,
 			)
 		}
+		slog.Info("turboquant runtime support",
+			"requested_k_type", requestedKVCacheTypeK,
+			"requested_v_type", requestedKVCacheTypeV,
+			"effective_k_type", kvCacheEffectiveK,
+			"effective_v_type", kvCacheEffectiveV,
+			"detected_head_dim", detectedHeadDim,
+			"head_dim_source", headDimSource,
+			"architecture_class", architectureClass,
+			"support_tier", supportTier,
+			"hybrid_kv_architecture", hybridKVArchitecture,
+			"native_turboquant_allowed", nativeTurboQuantAllowed,
+			"turboquant_path_kind", turboQuantPathKind,
+			"fallback_reason", fallbackReason,
+		)
 		if kvCachePathK == "" {
 			kvCachePathK = kvCachePath
 		}
@@ -282,6 +357,14 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		faEnabled:                 faEnabled,
 		faRequiredForVTurbo:       faRequiredForVTurbo,
 		vTurboSupported:           vTurboSupported,
+		detectedHeadDim:           detectedHeadDim,
+		headDimSource:             headDimSource,
+		architectureClass:         architectureClass,
+		supportTier:               supportTier,
+		supportReason:             supportReason,
+		unsupportedReason:         unsupportedReason,
+		hybridKVArchitecture:      hybridKVArchitecture,
+		nativeTurboQuantAllowed:   nativeTurboQuantAllowed,
 		tqBlockSize:               tqBlockSize,
 		tqLayoutKind:              tqLayoutKind,
 		tqLayoutVersion:           tqLayoutVersion,
@@ -455,6 +538,23 @@ func summarizeKVMode(kType, vType string) string {
 	return fmt.Sprintf("k=%s,v=%s", kType, vType)
 }
 
+func formatNativeSupportFallbackReason(support turboQuantModelSupport, referenceWrapperAvailable bool) string {
+	target := "reference wrapper"
+	if !referenceWrapperAvailable {
+		target = "f16 because reference wrapper is unavailable"
+	}
+	switch {
+	case support.UnsupportedReason != "" && support.DetectedHeadDim > 0:
+		return fmt.Sprintf("native TurboQuant disabled: %s; falling back to %s", support.UnsupportedReason, target)
+	case support.SupportReason != "" && support.HybridKVArchitecture:
+		return fmt.Sprintf("native TurboQuant disabled: %s; falling back to %s", support.SupportReason, target)
+	case support.UnsupportedReason != "":
+		return fmt.Sprintf("native TurboQuant disabled: %s; falling back to %s", support.UnsupportedReason, target)
+	default:
+		return fmt.Sprintf("native TurboQuant disabled by support matrix; falling back to %s", target)
+	}
+}
+
 type KVCacheRuntimeInfo struct {
 	Requested                 string
 	Effective                 string
@@ -488,6 +588,14 @@ type KVCacheRuntimeInfo struct {
 	FAEnabled                 bool
 	FARequiredForVTurbo       bool
 	VTurboSupported           bool
+	DetectedHeadDim           int
+	HeadDimSource             string
+	ArchitectureClass         string
+	SupportTier               string
+	SupportReason             string
+	UnsupportedReason         string
+	HybridKVArchitecture      bool
+	NativeTurboQuantAllowed   bool
 	TQBlockSize               int
 	TQLayoutKind              string
 	TQLayoutVersion           int
@@ -533,6 +641,14 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		FAEnabled:                 c.faEnabled,
 		FARequiredForVTurbo:       c.faRequiredForVTurbo,
 		VTurboSupported:           c.vTurboSupported,
+		DetectedHeadDim:           c.detectedHeadDim,
+		HeadDimSource:             c.headDimSource,
+		ArchitectureClass:         c.architectureClass,
+		SupportTier:               c.supportTier,
+		SupportReason:             c.supportReason,
+		UnsupportedReason:         c.unsupportedReason,
+		HybridKVArchitecture:      c.hybridKVArchitecture,
+		NativeTurboQuantAllowed:   c.nativeTurboQuantAllowed,
 		TQBlockSize:               c.tqBlockSize,
 		TQLayoutKind:              c.tqLayoutKind,
 		TQLayoutVersion:           c.tqLayoutVersion,

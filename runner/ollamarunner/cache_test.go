@@ -718,6 +718,7 @@ type runnerTestBackend struct {
 	supportsTurboQuantFastPath bool
 	supportsTurboQuantCUDA     bool
 	requiresFlashAttention     bool
+	config                     fs.Config
 }
 
 func (b *runnerTestBackend) Close() {}
@@ -731,6 +732,9 @@ func (b *runnerTestBackend) BackendMemory() ml.BackendMemory {
 }
 
 func (b *runnerTestBackend) Config() fs.Config {
+	if b.config != nil {
+		return b.config
+	}
 	return runnerTestConfig{}
 }
 
@@ -969,5 +973,69 @@ func TestNewInputCacheKeepsVTurboWhenFlashAttentionIsEnabled(t *testing.T) {
 	}
 	if info.RequestedMode != "tq35" || info.EffectiveMode != "tq35" {
 		t.Fatalf("unexpected mode summaries: %+v", info)
+	}
+}
+
+func TestNewInputCacheExposesSupportMatrixFields(t *testing.T) {
+	backend := &runnerTestBackend{
+		supportsTurboQuantFastPath: true,
+		config: stubConfig{
+			arch: "llama",
+			u32: map[string]uint32{
+				"attention.key_length": 128,
+			},
+		},
+	}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := inputCache.RuntimeInfo()
+	if info.DetectedHeadDim != 128 || info.HeadDimSource != string(turboQuantHeadDimSourceAttentionKeyLength) {
+		t.Fatalf("unexpected head-dim detection info: %+v", info)
+	}
+	if info.ArchitectureClass != "llama-family" || info.SupportTier != string(turboQuantSupportSafe) {
+		t.Fatalf("unexpected support info: %+v", info)
+	}
+	if info.HybridKVArchitecture || !info.NativeTurboQuantAllowed {
+		t.Fatalf("unexpected hybrid/native support flags: %+v", info)
+	}
+}
+
+func TestNewInputCacheMarksHybridSupportAsNonNative(t *testing.T) {
+	backend := &runnerTestBackend{
+		supportsTurboQuantFastPath: true,
+		config: stubConfig{
+			arch: "gptoss",
+			u32: map[string]uint32{
+				"attention.key_length": 128,
+			},
+		},
+	}
+	model := newRunnerTestModel(
+		kvcache.NewWrapperCache(kvcache.NewEncoderCache(), kvcache.NewCausalCache(nil)),
+		backend,
+	)
+
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := inputCache.RuntimeInfo()
+	if !info.HybridKVArchitecture {
+		t.Fatalf("expected hybrid support info, got %+v", info)
+	}
+	if info.ArchitectureClass != "gptoss-hybrid" {
+		t.Fatalf("unexpected architecture class: %+v", info)
+	}
+	if info.NativeTurboQuantAllowed {
+		t.Fatalf("expected native rollout disabled for hybrid path: %+v", info)
+	}
+	if info.SupportReason == "" {
+		t.Fatalf("expected hybrid support reason: %+v", info)
 	}
 }

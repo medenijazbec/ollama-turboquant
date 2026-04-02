@@ -1012,6 +1012,14 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					FAEnabled:                 s.lastLoad.FlashAttention == ml.FlashAttentionEnabled,
 					FARequiredForVTurbo:       s.kvCacheInfo.FARequiredForVTurbo,
 					VTurboSupported:           s.kvCacheInfo.VTurboSupported,
+					DetectedHeadDim:           s.kvCacheInfo.DetectedHeadDim,
+					HeadDimSource:             s.kvCacheInfo.HeadDimSource,
+					ArchitectureClass:         s.kvCacheInfo.ArchitectureClass,
+					SupportTier:               s.kvCacheInfo.SupportTier,
+					SupportReason:             s.kvCacheInfo.SupportReason,
+					UnsupportedReason:         s.kvCacheInfo.UnsupportedReason,
+					HybridKVArchitecture:      s.kvCacheInfo.HybridKVArchitecture,
+					NativeTurboQuantAllowed:   s.kvCacheInfo.NativeTurboQuantAllowed,
 					TQBlockSize:               s.kvCacheInfo.TQBlockSize,
 					TQLayoutKind:              s.kvCacheInfo.TQLayoutKind,
 					TQLayoutVersion:           s.kvCacheInfo.TQLayoutVersion,
@@ -1270,6 +1278,25 @@ func (s *Server) allocModel(
 		return err
 	}
 	s.kvCacheInfo = s.cache.RuntimeInfo()
+	slog.Info("turboquant runtime diagnostics",
+		"requested_k_type", s.kvCacheInfo.RequestedK,
+		"requested_v_type", s.kvCacheInfo.RequestedV,
+		"effective_k_type", s.kvCacheInfo.EffectiveK,
+		"effective_v_type", s.kvCacheInfo.EffectiveV,
+		"requested_mode", s.kvCacheInfo.RequestedMode,
+		"effective_mode", s.kvCacheInfo.EffectiveMode,
+		"kv_symmetric", s.kvCacheInfo.Symmetric,
+		"kv_asymmetric", s.kvCacheInfo.Asymmetric,
+		"detected_head_dim", s.kvCacheInfo.DetectedHeadDim,
+		"architecture_class", s.kvCacheInfo.ArchitectureClass,
+		"support_tier", s.kvCacheInfo.SupportTier,
+		"hybrid_kv_architecture", s.kvCacheInfo.HybridKVArchitecture,
+		"fa_enabled", s.kvCacheInfo.FAEnabled,
+		"turboquant_path_kind", s.kvCacheInfo.TurboQuantPathKind,
+		"native_turboquant_active", s.kvCacheInfo.NativeTurboQuantActive,
+		"reference_turboquant_active", s.kvCacheInfo.ReferenceTurboQuantActive,
+		"fallback_reason", s.kvCacheInfo.FallbackReason,
+	)
 
 	s.parallel = parallel
 	s.seqs = make([]*Sequence, s.parallel)
