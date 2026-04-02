@@ -115,3 +115,34 @@ func TestRunProbeRequestRequestHostIncludesKVOptions(t *testing.T) {
 		t.Fatalf("kv_cache_backend = %#v, want cuda", got)
 	}
 }
+
+func TestHostMetricsStatsReportUnavailableSource(t *testing.T) {
+	monitor := newHostMetricsMonitor(0, true)
+	stats := monitor.stats()
+	if stats.Available {
+		t.Fatalf("expected unavailable stats, got %+v", stats)
+	}
+	if stats.Source != "unavailable" {
+		t.Fatalf("Source = %q, want unavailable", stats.Source)
+	}
+	if stats.HostRAMUsedBytes != nil || stats.ProcessRSSBytes != nil {
+		t.Fatalf("expected nil unavailable metrics, got %+v", stats)
+	}
+}
+
+func TestHostMetricsStatsKeepSourceAndNilProcessRSS(t *testing.T) {
+	monitor := newHostMetricsMonitor(0, true)
+	monitor.available = true
+	monitor.source = "proc-meminfo"
+	monitor.currentRAM = 2048
+	monitor.peakRAM = 4096
+	monitor.samples = 2
+
+	stats := monitor.stats()
+	if !stats.Available || stats.Source != "proc-meminfo" {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if stats.ProcessRSSBytes != nil {
+		t.Fatalf("expected nil process rss, got %+v", stats)
+	}
+}

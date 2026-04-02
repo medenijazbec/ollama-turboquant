@@ -36,6 +36,12 @@ func TestWriteCSV(t *testing.T) {
 	if !strings.Contains(string(data), "fa_required_for_v_turbo") {
 		t.Fatal("expected Flash Attention gating column in csv header")
 	}
+	if !strings.Contains(string(data), "detected_head_dim,architecture_class,support_tier,hybrid_kv_architecture") {
+		t.Fatal("expected support-matrix columns in csv header")
+	}
+	if !strings.Contains(string(data), "gpu_stats_source,host_stats_source,validation_kind,validation_status") {
+		t.Fatal("expected telemetry/validation columns in csv header")
+	}
 	if !strings.Contains(string(data), "kv_algo_resolved") {
 		t.Fatal("expected kv algorithm csv header")
 	}
@@ -91,5 +97,45 @@ func TestValidateResolvedKVModesAllowsExplicitKOnlyFallback(t *testing.T) {
 
 	if err := validateResolvedKVModes(row); err != nil {
 		t.Fatalf("expected explicit K-only fallback to validate, got %v", err)
+	}
+}
+
+func TestWriteSummaryExcludesFallbackAndFailedValidationRows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "summary.md")
+	rows := []epochAggregate{
+		{
+			HostLabel:        "turbo",
+			KVModeRequested:  "tq35",
+			EffectiveMode:    "tq35",
+			Workload:         string(workloadDecodeGrowth),
+			NumCtx:           8192,
+			Concurrency:      1,
+			Status:           statusOK,
+			FullGPUResidency: true,
+			ValidationStatus: string(validationFailed),
+		},
+		{
+			HostLabel:        "turbo",
+			KVModeRequested:  "tq35",
+			EffectiveMode:    "tq35",
+			Workload:         string(workloadDecodeGrowth),
+			NumCtx:           8192,
+			Concurrency:      1,
+			Status:           statusOK,
+			FullGPUResidency: true,
+			FallbackApplied:  true,
+			ValidationStatus: string(validationPassed),
+		},
+	}
+	if err := writeSummary(path, rows, nil); err != nil {
+		t.Fatalf("writeSummary failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if strings.Contains(string(data), "claim: On the TurboQuant runtime") {
+		t.Fatal("expected summary to exclude fallback or failed-validation claims")
 	}
 }

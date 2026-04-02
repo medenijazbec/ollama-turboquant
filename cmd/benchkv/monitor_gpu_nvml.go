@@ -62,3 +62,5 @@ func (p *nvmlPoller) poll() (gpuSample, bool) {
 func (p *nvmlPoller) close() {
 	nvml.Shutdown()
 }
+
+func (p *nvmlPoller) source() string { return "nvml" }

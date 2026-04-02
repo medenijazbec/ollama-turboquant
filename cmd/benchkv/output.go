@@ -36,7 +36,7 @@ func writeCSV(path string, rows []epochAggregate) error {
 	defer w.Flush()
 
 	header := []string{
-		"host", "host_label", "server_version", "model", "quant", "kv_mode_requested", "kv_mode_requested_k", "kv_mode_requested_v", "kv_mode_resolved", "kv_mode_resolved_k", "kv_mode_resolved_v", "requested_mode", "effective_mode", "kv_algo_resolved", "kv_algo_resolved_k", "kv_algo_resolved_v", "kv_path", "kv_path_k", "kv_path_v", "kv_symmetric", "kv_asymmetric", "fallback_applied", "k_only_fallback", "fallback_reason", "turboquant_path_kind", "native_turboquant_active", "reference_turboquant_active", "fa_enabled", "fa_required_for_v_turbo", "v_turbo_supported", "tq_block_size",
+		"host", "host_label", "server_version", "model", "quant", "kv_mode_requested", "kv_mode_requested_k", "kv_mode_requested_v", "kv_mode_resolved", "kv_mode_resolved_k", "kv_mode_resolved_v", "requested_mode", "effective_mode", "kv_algo_resolved", "kv_algo_resolved_k", "kv_algo_resolved_v", "kv_path", "kv_path_k", "kv_path_v", "kv_symmetric", "kv_asymmetric", "fallback_applied", "k_only_fallback", "fallback_reason", "turboquant_path_kind", "native_turboquant_active", "reference_turboquant_active", "fa_enabled", "fa_required_for_v_turbo", "v_turbo_supported", "detected_head_dim", "architecture_class", "support_tier", "hybrid_kv_architecture", "tq_block_size", "gpu_stats_source", "host_stats_source", "validation_kind", "validation_status", "validation_expected", "validation_observed", "validation_error",
 		"workload", "num_ctx", "concurrency", "prompt_tokens_target", "prompt_eval_count", "max_tokens", "eval_count",
 		"generated_tokens", "live_kv_tokens_total", "ctx_x_conc", "epoch", "warmup", "prefill_tps", "decode_tps",
 		"ttft_ms_mean", "ttft_ms_p95", "load_ms", "total_ms", "wall_ms", "peak_vram_bytes", "avg_gpu_util", "peak_gpu_util",
@@ -80,7 +80,18 @@ func writeCSV(path string, rows []epochAggregate) error {
 			fmt.Sprintf("%t", row.FAEnabled),
 			fmt.Sprintf("%t", row.FARequiredForVTurbo),
 			fmt.Sprintf("%t", row.VTurboSupported),
+			fmt.Sprintf("%d", row.DetectedHeadDim),
+			row.ArchitectureClass,
+			row.SupportTier,
+			fmt.Sprintf("%t", row.HybridKVArchitecture),
 			fmt.Sprintf("%d", row.TQBlockSize),
+			row.GPUStatsSource,
+			row.HostStatsSource,
+			row.ValidationKind,
+			row.ValidationStatus,
+			row.ValidationExpected,
+			row.ValidationObserved,
+			row.ValidationError,
 			row.Workload,
 			fmt.Sprintf("%d", row.NumCtx),
 			fmt.Sprintf("%d", row.Concurrency),
@@ -216,7 +227,7 @@ func writeSameRuntimeSummary(b *strings.Builder, rows []epochAggregate, sameRunt
 		if _, ok := sameRuntimeHosts[row.HostLabel]; !ok {
 			return false
 		}
-		if row.FallbackApplied {
+		if row.FallbackApplied || row.ValidationStatus == string(validationFailed) {
 			return false
 		}
 		return !row.Warmup && row.Status == statusOK && row.FullGPUResidency && !row.Spilled && (row.EffectiveMode == "f16" || strings.HasPrefix(row.EffectiveMode, "tq"))
@@ -257,7 +268,7 @@ func writeSameRuntimeSummary(b *strings.Builder, rows []epochAggregate, sameRunt
 
 func writeProductSummary(b *strings.Builder, rows []epochAggregate) {
 	grouped := summarizeRows(rows, func(row epochAggregate) bool {
-		if row.Warmup || row.Status != statusOK || !row.FullGPUResidency || row.Spilled || row.FallbackApplied {
+		if row.Warmup || row.Status != statusOK || !row.FullGPUResidency || row.Spilled || row.FallbackApplied || row.ValidationStatus == string(validationFailed) {
 			return false
 		}
 		return (row.HostLabel == "baseline" && row.EffectiveMode == "f16") || (row.HostLabel == "turbo" && row.EffectiveMode == "tq35")

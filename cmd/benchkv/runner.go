@@ -383,10 +383,12 @@ func runEpoch(cfg config, cell sweepCell, preflight hostPreflight, cal promptCal
 		results[i].ServerVersion = preflight.Version
 		results[i].Quant = preflight.ModelQuant
 		results[i].GPUMetricsAvailable = stats.Available
+		results[i].GPUStatsSource = stats.Source
 		results[i].PeakVRAMBytes = stats.PeakVRAMBytes
 		results[i].AvgGPUUtil = stats.AvgGPUUtil
 		results[i].PeakGPUUtil = stats.PeakGPUUtil
 		results[i].HostMetricsAvailable = hostStats.Available
+		results[i].HostStatsSource = hostStats.Source
 		results[i].HostRAMUsedBytes = hostStats.HostRAMUsedBytes
 		results[i].PeakHostRAMBytes = hostStats.PeakHostRAMBytes
 		if hostStats.ProcessRSSBytes != nil {
@@ -429,6 +431,8 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 		Warmup:             warmup,
 		RunnerRSSBytes:     -1,
 		GPUResidency:       "unknown",
+		GPUStatsSource:     "unavailable",
+		HostStatsSource:    "unavailable",
 		Status:             statusFailed,
 		RecordedAt:         time.Now().UTC(),
 	}
@@ -516,6 +520,10 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 	row.FAEnabled = finalMetrics.FAEnabled
 	row.FARequiredForVTurbo = finalMetrics.FARequiredForVTurbo
 	row.VTurboSupported = finalMetrics.VTurboSupported
+	row.DetectedHeadDim = finalMetrics.DetectedHeadDim
+	row.ArchitectureClass = finalMetrics.ArchitectureClass
+	row.SupportTier = finalMetrics.SupportTier
+	row.HybridKVArchitecture = finalMetrics.HybridKVArchitecture
 	row.TQBlockSize = finalMetrics.TQBlockSize
 	row.PromptEvalCount = finalMetrics.PromptEvalCount
 	row.EvalCount = finalMetrics.EvalCount
@@ -535,6 +543,19 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 		row.Status = statusFailed
 		row.Success = boolPtr(false)
 		row.Error = err.Error()
+	}
+	validation := runValidation(cfg, cell, row)
+	row.ValidationKind = string(validation.Kind)
+	row.ValidationStatus = string(validation.Status)
+	row.ValidationExpected = validation.Expected
+	row.ValidationObserved = validation.Observed
+	row.ValidationError = validation.Error
+	if row.Status == statusOK && validation.Status == validationFailed {
+		row.Status = statusFailed
+		row.Success = boolPtr(false)
+		if row.Error == "" {
+			row.Error = validation.Error
+		}
 	}
 	return enrichWithRunningInfo(ctx, cell.Host.Client, cfg.Model, row)
 }
@@ -593,7 +614,18 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		FAEnabled:                 rows[0].FAEnabled,
 		FARequiredForVTurbo:       rows[0].FARequiredForVTurbo,
 		VTurboSupported:           rows[0].VTurboSupported,
+		DetectedHeadDim:           rows[0].DetectedHeadDim,
+		ArchitectureClass:         rows[0].ArchitectureClass,
+		SupportTier:               rows[0].SupportTier,
+		HybridKVArchitecture:      rows[0].HybridKVArchitecture,
 		TQBlockSize:               rows[0].TQBlockSize,
+		GPUStatsSource:            rows[0].GPUStatsSource,
+		HostStatsSource:           rows[0].HostStatsSource,
+		ValidationKind:            rows[0].ValidationKind,
+		ValidationStatus:          rows[0].ValidationStatus,
+		ValidationObserved:        rows[0].ValidationObserved,
+		ValidationExpected:        rows[0].ValidationExpected,
+		ValidationError:           rows[0].ValidationError,
 		Workload:                  rows[0].Workload,
 		NumCtx:                    rows[0].NumCtx,
 		PromptTokensTarget:        rows[0].PromptTokensTarget,
@@ -668,6 +700,40 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		}
 		if row.RunnerRSSBytes > agg.RunnerRSSBytes {
 			agg.RunnerRSSBytes = row.RunnerRSSBytes
+		}
+		if agg.GPUStatsSource == "" {
+			agg.GPUStatsSource = row.GPUStatsSource
+		}
+		if agg.HostStatsSource == "" {
+			agg.HostStatsSource = row.HostStatsSource
+		}
+		if agg.ValidationKind == "" {
+			agg.ValidationKind = row.ValidationKind
+		}
+		switch row.ValidationStatus {
+		case string(validationFailed):
+			agg.ValidationStatus = row.ValidationStatus
+		case string(validationPassed):
+			if agg.ValidationStatus == "" || agg.ValidationStatus == string(validationSkipped) || agg.ValidationStatus == string(validationScaffolded) {
+				agg.ValidationStatus = row.ValidationStatus
+			}
+		case string(validationScaffolded):
+			if agg.ValidationStatus == "" || agg.ValidationStatus == string(validationSkipped) {
+				agg.ValidationStatus = row.ValidationStatus
+			}
+		case string(validationSkipped):
+			if agg.ValidationStatus == "" {
+				agg.ValidationStatus = row.ValidationStatus
+			}
+		}
+		if agg.ValidationExpected == "" {
+			agg.ValidationExpected = row.ValidationExpected
+		}
+		if agg.ValidationObserved == "" {
+			agg.ValidationObserved = row.ValidationObserved
+		}
+		if agg.ValidationError == "" || row.ValidationStatus == string(validationFailed) {
+			agg.ValidationError = row.ValidationError
 		}
 		agg.FullGPUResidency = agg.FullGPUResidency && row.FullGPUResidency
 		agg.GPUOffloadRegression = agg.GPUOffloadRegression || row.GPUOffloadRegression

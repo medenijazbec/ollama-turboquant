@@ -144,7 +144,18 @@ type workerResult struct {
 	FAEnabled                 bool         `json:"fa_enabled"`
 	FARequiredForVTurbo       bool         `json:"fa_required_for_v_turbo"`
 	VTurboSupported           bool         `json:"v_turbo_supported"`
+	DetectedHeadDim           int          `json:"detected_head_dim,omitempty"`
+	ArchitectureClass         string       `json:"architecture_class,omitempty"`
+	SupportTier               string       `json:"support_tier,omitempty"`
+	HybridKVArchitecture      bool         `json:"hybrid_kv_architecture"`
 	TQBlockSize               int          `json:"tq_block_size,omitempty"`
+	GPUStatsSource            string       `json:"gpu_stats_source,omitempty"`
+	HostStatsSource           string       `json:"host_stats_source,omitempty"`
+	ValidationKind            string       `json:"validation_kind,omitempty"`
+	ValidationStatus          string       `json:"validation_status,omitempty"`
+	ValidationObserved        string       `json:"validation_observed,omitempty"`
+	ValidationExpected        string       `json:"validation_expected,omitempty"`
+	ValidationError           string       `json:"validation_error,omitempty"`
 	Workload                  string       `json:"workload"`
 	NumCtx                    int          `json:"num_ctx"`
 	PromptTokensTarget        int          `json:"prompt_tokens_target"`
@@ -221,7 +232,18 @@ type epochAggregate struct {
 	FAEnabled                 bool
 	FARequiredForVTurbo       bool
 	VTurboSupported           bool
+	DetectedHeadDim           int
+	ArchitectureClass         string
+	SupportTier               string
+	HybridKVArchitecture      bool
 	TQBlockSize               int
+	GPUStatsSource            string
+	HostStatsSource           string
+	ValidationKind            string
+	ValidationStatus          string
+	ValidationObserved        string
+	ValidationExpected        string
+	ValidationError           string
 	Workload                  string
 	NumCtx                    int
 	PromptTokensTarget        int
@@ -279,6 +301,7 @@ type staircaseRecord struct {
 
 type gpuStats struct {
 	Available        bool
+	Source           string
 	PeakVRAMBytes    *int64
 	AvgGPUUtil       *float64
 	PeakGPUUtil      *float64
@@ -288,6 +311,7 @@ type gpuStats struct {
 
 type hostMemoryStats struct {
 	Available        bool
+	Source           string
 	HostRAMUsedBytes *int64
 	PeakHostRAMBytes *int64
 	ProcessRSSBytes  *int64

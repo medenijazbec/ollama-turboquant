@@ -12,6 +12,7 @@ import (
 type gpuPoller interface {
 	poll() (gpuSample, bool)
 	close()
+	source() string
 }
 
 type gpuSample struct {
@@ -29,6 +30,7 @@ type gpuMonitor struct {
 
 	mu             sync.Mutex
 	available      bool
+	source         string
 	peakVRAM       int64
 	sumMeanUtil    float64
 	peakMeanUtil   float64
@@ -95,6 +97,7 @@ func (m *gpuMonitor) poll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.available = true
+	m.source = m.poller.source()
 	if sample.peakVRAMBytes > m.peakVRAM {
 		m.peakVRAM = sample.peakVRAMBytes
 	}
@@ -115,11 +118,12 @@ func (m *gpuMonitor) stats() gpuStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.available || m.samples == 0 {
-		return gpuStats{Available: false}
+		return gpuStats{Available: false, Source: "unavailable"}
 	}
 
 	stats := gpuStats{
 		Available:     true,
+		Source:        firstNonEmpty(m.source, "unavailable"),
 		PeakVRAMBytes: int64Ptr(m.peakVRAM),
 		AvgGPUUtil:    float64Ptr(m.sumMeanUtil / float64(m.samples)),
 		PeakGPUUtil:   float64Ptr(m.peakMeanUtil),
@@ -163,6 +167,8 @@ func (p *smiPoller) poll() (gpuSample, bool) {
 }
 
 func (p *smiPoller) close() {}
+
+func (p *smiPoller) source() string { return "nvidia-smi" }
 
 func parseNvidiaSMI(out string) (int64, float64, bool) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
