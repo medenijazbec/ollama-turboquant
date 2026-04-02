@@ -17,6 +17,21 @@ Status in this branch:
 - asymmetric K/V controls are being added, but symmetric `kv_cache_type` remains the compatibility default
 - experimental paths should not be treated as production-safe memory savings unless the backend owns the packed KV payload directly
 
+### Rollout Guidance
+
+This branch does not expose one universal "best" TurboQuant mode.
+
+- `safe`: recommend `tq35/tq35` on the main validated architecture families and support tiers
+- `conservative`: recommend `q8_0-K + tq35-V` only where validation and runtime support both hold
+- `experimental`: `tq25`, `turbo4` aliases, adaptive/per-layer K ideas, and native-migration lanes remain explicit experimental work
+
+Production-safe wording should stay conservative:
+
+- `reference_wrapper` is the current stable comparison lane
+- `native_backend` is still in progress
+- wrapper-mode runs do not by themselves prove backend-native KV memory savings
+- hybrid, MLA, and distributed/RPC deployments should be treated as guarded lanes until layout/path compatibility and validation coverage are stronger
+
 This fork adds a paper-style TurboQuant KV-cache path for `tq25` and `tq35`:
 
 - deterministic random orthogonal rotation

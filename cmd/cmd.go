@@ -602,6 +602,59 @@ func normalizeCacheTypeFlagValue(flagName, value string) (string, error) {
 	}
 }
 
+func isTurboQuantCLIType(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "tq25", "tq35", "tq3", "tq4":
+		return true
+	default:
+		return false
+	}
+}
+
+func emitTurboQuantPairingWarnings(rawUnified, rawK, rawV, normalizedUnified, requestedK, requestedV string) {
+	warnings := make([]string, 0, 4)
+
+	// Implemented rollout-preset guidance so recommendation lanes stay tied to validated mixed-K/V data; idea source: @seanrasch.
+	// Implemented preset warnings so asymmetric and experimental pairings stay guarded instead of being implied production-safe; idea source: @sjoerdmaessen.
+	if normalizedUnified == "tq25" || requestedK == "tq25" || requestedV == "tq25" {
+		warnings = append(warnings, "warning: tq25 remains in the experimental rollout lane and is not promoted to a production-safe preset")
+	}
+	// Implemented explicit experimental gating language for turbo4 until the branch has stronger validation coverage; idea source: @Dubascudes.
+	if strings.EqualFold(strings.TrimSpace(rawUnified), "tq4") || strings.EqualFold(strings.TrimSpace(rawK), "tq4") || strings.EqualFold(strings.TrimSpace(rawV), "tq4") {
+		warnings = append(warnings, "warning: tq4 currently normalizes to tq35 in this branch and remains an experimental alias, not a production-safe preset")
+	}
+	// Implemented the conservative asymmetric recommendation lane around q8_0-K plus TurboQuant V when validation supports it; idea source: @primoco.
+	if requestedK != "" && requestedV != "" && requestedK != requestedV && isTurboQuantCLIType(requestedV) {
+		if !(requestedK == "q8_0" && requestedV == "tq35") {
+			warnings = append(warnings, "warning: requested TurboQuant pairing is outside the current validated recommendation set; treating it as experimental")
+			warnings = append(warnings, "warning: q8_0-K + tq35-V is the only asymmetric conservative pairing currently endorsed in this branch")
+		}
+	}
+
+	for _, warning := range dedupeCLIWarnings(warnings) {
+		fmt.Fprintln(os.Stderr, warning)
+	}
+}
+
+func dedupeCLIWarnings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func RunHandler(cmd *cobra.Command, args []string) error {
 	interactive := true
 
@@ -662,18 +715,23 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 	var requestedKVCacheTypeK string
 	var requestedKVCacheTypeV string
 	var requestedKVCacheBackend string
+	var rawTurboQuantValue string
+	var rawCacheTypeKValue string
+	var rawCacheTypeVValue string
 	turboquantFlag := cmd.Flags().Lookup("turboquant")
 	turboquantCUDAFlag := cmd.Flags().Lookup("turboquant-cuda")
 	if turboquantFlag != nil && turboquantCUDAFlag != nil && turboquantFlag.Changed && turboquantCUDAFlag.Changed {
 		return errors.New("only one of --turboquant or --turboquant-cuda may be specified")
 	}
 	if turboquantFlag != nil && turboquantFlag.Changed {
+		rawTurboQuantValue = turboquantFlag.Value.String()
 		requestedKVCacheType, err = normalizeTurboQuantFlagValue("--turboquant", turboquantFlag.Value.String())
 		if err != nil {
 			return err
 		}
 	}
 	if turboquantCUDAFlag != nil && turboquantCUDAFlag.Changed {
+		rawTurboQuantValue = turboquantCUDAFlag.Value.String()
 		requestedKVCacheType, err = normalizeTurboQuantFlagValue("--turboquant-cuda", turboquantCUDAFlag.Value.String())
 		if err != nil {
 			return err
@@ -684,6 +742,7 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 	}
 	cacheTypeKFlag := cmd.Flags().Lookup("cache-type-k")
 	if cacheTypeKFlag != nil && cacheTypeKFlag.Changed {
+		rawCacheTypeKValue = cacheTypeKFlag.Value.String()
 		requestedKVCacheTypeK, err = normalizeCacheTypeFlagValue("--cache-type-k", cacheTypeKFlag.Value.String())
 		if err != nil {
 			return err
@@ -691,6 +750,7 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 	}
 	cacheTypeVFlag := cmd.Flags().Lookup("cache-type-v")
 	if cacheTypeVFlag != nil && cacheTypeVFlag.Changed {
+		rawCacheTypeVValue = cacheTypeVFlag.Value.String()
 		requestedKVCacheTypeV, err = normalizeCacheTypeFlagValue("--cache-type-v", cacheTypeVFlag.Value.String())
 		if err != nil {
 			return err
@@ -834,10 +894,9 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 
 	if requestedKVCacheType != "" && (requestedKVCacheTypeK != "" || requestedKVCacheTypeV != "") {
 		// Implemented explicit split-K/V override warnings for the symmetric shorthand path; idea source: @TheTom.
-		// Kept mixed K/V requests visible in the CLI surface so conservative asymmetric pairings stay testable; idea source: @primoco.
-		// Added explicit guardrail messaging instead of ambiguous mixed-mode behavior; idea source: @sjoerdmaessen.
 		fmt.Fprintf(os.Stderr, "warning: --turboquant is a symmetric shorthand; --cache-type-k/--cache-type-v override the corresponding side\n")
 	}
+	emitTurboQuantPairingWarnings(rawTurboQuantValue, rawCacheTypeKValue, rawCacheTypeVValue, requestedKVCacheType, requestedKVCacheTypeK, requestedKVCacheTypeV)
 
 	if requestedKVCacheType != "" {
 		opts.Options["kv_cache_type"] = requestedKVCacheType

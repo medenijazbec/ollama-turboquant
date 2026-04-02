@@ -19,8 +19,36 @@ This branch currently exposes:
 
 - `reference_wrapper`: the paper-faithful codec and Go-side wrapper cache path
 - `native_backend`: the native-engine migration lane, introduced incrementally with explicit guards and status reporting
+- `experimental` lanes: `tq25`, hybrid/native rollout work, and future `turbo4` or adaptive/per-layer ideas remain guarded
 
 Wrapper-mode runs are still the reference lane. Do not treat them as proof of backend-native KV memory savings until the backend owns the packed KV payload directly.
+
+## Rollout Presets
+
+This branch does not recommend one universal TurboQuant mode. Use the support tier and runtime metadata to pick a rollout lane:
+
+- `safe`: recommend symmetric `tq35/tq35` on the primary validated architecture families and `support_tier=safe`
+- `conservative`: recommend `q8_0-K + tq35-V` only where the runtime still reports V-side TurboQuant support and no fallback
+- `experimental`: `tq25`, `tq4` aliases, adaptive/per-layer K ideas, and native-migration paths stay behind explicit warnings
+
+Current conservative guidance is intentionally narrow. Some asymmetric pairings still fail production-style correctness checks, so pairings outside the validated set should be treated as experimental even if they run.
+
+## Recommended Pairings
+
+Validated recommendation set in this branch:
+
+- `tq35/tq35` on supported `safe` architecture families
+- `q8_0-K + tq35-V` as the only first-class conservative asymmetric pairing, and only when runtime FA/path support keeps V in TurboQuant instead of falling back
+
+Guarded or experimental-only pairings:
+
+- `tq25/tq25`
+- `tq25/tq35` or `tq35/tq25`
+- arbitrary asymmetric mixes such as `q4_0-K + tq35-V`
+- `tq4` / `turbo4` aliases
+- adaptive/per-layer K compression
+
+Those modes may still be useful for investigation, but this branch does not describe them as production-safe recommendations.
 
 ## What Is Implemented
 
@@ -109,6 +137,14 @@ The runtime reports the resolved mode and algorithm in the final response metric
 - `kv_asymmetric`
 - `fallback_reason`
 - `turboquant_path_kind`
+- `support_tier`
+- `preset_requested`
+- `preset_resolved`
+- `preset_warning`
+- `pairing_validated`
+- `experimental_lane`
+
+Use the effective K/V mode and these runtime fields for comparisons. If requested and effective modes differ, the effective mode is the truth for rollout and benchmark claims.
 
 ### Modelfile default
 
@@ -137,6 +173,8 @@ If neither the request nor the model specifies a KV mode, Ollama falls back to `
 
 `OLLAMA_KV_CACHE_TYPE_K` and `OLLAMA_KV_CACHE_TYPE_V` can override the K or V side independently.
 
+`OLLAMA_TURBOQUANT_PRESET` can be set to `safe`, `conservative`, or `experimental` to drive rollout guidance and warnings without changing the actual requested K/V types.
+
 ## Mode Precedence
 
 The effective KV cache mode is resolved in this order:
@@ -153,6 +191,9 @@ The effective KV cache mode is resolved in this order:
 - The legacy llama runner still rejects TurboQuant modes.
 - TurboQuant modes require the new engine path.
 - Quantized KV modes require flash attention support.
+- `reference_wrapper` remains the stable comparison lane for this branch.
+- `native_grouped_scaffold` and `native_backend` should not be assumed wire-compatible across distributed/RPC boundaries unless both ends match layout kind, layout version, and path semantics.
+- `turbo4` and adaptive/per-layer K work are not promoted to production-ready guidance in this branch.
 
 ## Local Test Lanes
 

@@ -224,6 +224,8 @@ var (
 	KvCacheTypeV = String("OLLAMA_KV_CACHE_TYPE_V")
 	// KvCacheBackend requests a backend-specific KV cache path.
 	KvCacheBackend = String("OLLAMA_KV_CACHE_BACKEND")
+	// TurboQuantPreset selects rollout guidance for warnings and recommendation metadata.
+	TurboQuantPreset = String("OLLAMA_TURBOQUANT_PRESET")
 	// NoHistory disables readline history.
 	NoHistory = Bool("OLLAMA_NOHISTORY")
 	// NoPrune disables pruning of model blobs on startup.
@@ -317,6 +319,7 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_KV_CACHE_TYPE_K":    {"OLLAMA_KV_CACHE_TYPE_K", KvCacheTypeK(), "K-side KV cache override: f16, q8_0, q4_0, tq25, tq35"},
 		"OLLAMA_KV_CACHE_TYPE_V":    {"OLLAMA_KV_CACHE_TYPE_V", KvCacheTypeV(), "V-side KV cache override: f16, q8_0, q4_0, tq25, tq35"},
 		"OLLAMA_KV_CACHE_BACKEND":   {"OLLAMA_KV_CACHE_BACKEND", KvCacheBackend(), "Optional KV cache backend request: cuda"},
+		"OLLAMA_TURBOQUANT_PRESET":  {"OLLAMA_TURBOQUANT_PRESET", TurboQuantPreset(), "TurboQuant rollout guidance preset: safe, conservative, experimental"},
 		"OLLAMA_GPU_OVERHEAD":       {"OLLAMA_GPU_OVERHEAD", GpuOverhead(), "Reserve a portion of VRAM per GPU (bytes)"},
 		"OLLAMA_HOST":               {"OLLAMA_HOST", Host(), "IP Address for the ollama server (default 127.0.0.1:11434)"},
 		"OLLAMA_KEEP_ALIVE":         {"OLLAMA_KEEP_ALIVE", KeepAlive(), "The duration that models stay loaded in memory (default \"5m\")"},

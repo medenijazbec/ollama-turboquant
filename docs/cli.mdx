@@ -23,11 +23,33 @@ ollama run gemma3 --turboquant=tq25
 ollama run gemma3 --turboquant=tq35
 ```
 
+Split K and V explicitly:
+
+```
+ollama run gemma3 --cache-type-k=q8_0 --cache-type-v=tq35
+```
+
 Disable TurboQuant explicitly for a run, even if the model or environment defaults enable it:
 
 ```
 ollama run gemma3 --turboquant=off
 ```
+
+### Warnings and rollout lanes
+
+The CLI keeps TurboQuant selectors flexible, but the recommendation lanes are conservative:
+
+- `tq35` is the primary safe recommendation
+- `q8_0-K + tq35-V` is the only first-class conservative asymmetric pairing currently endorsed
+- `tq25` and `tq4` aliases remain experimental
+
+The CLI prints warnings when:
+
+- `--turboquant` is used together with `--cache-type-k` or `--cache-type-v`
+- an asymmetric pairing falls outside the current validated recommendation set
+- `tq25` or `tq4` is requested
+
+Those warnings are guidance, not hard failures. The final runtime metrics still report the effective mode, support tier, fallback reason, and path kind.
 
 ### Launch integrations
 

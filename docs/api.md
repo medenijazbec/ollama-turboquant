@@ -51,7 +51,7 @@ Generate a response for a given prompt with a provided model. This is a streamin
 Advanced parameters (optional):
 
 - `format`: the format to return a response in. Format can be `json` or a JSON schema
-- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature` and `kv_cache_type`
+- `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.mdx#valid-parameters-and-values) such as `temperature`, `kv_cache_type`, `kv_cache_type_k`, and `kv_cache_type_v`
 - `system`: system message to (overrides what is defined in the `Modelfile`)
 - `template`: the prompt template to use (overrides what is defined in the `Modelfile`)
 - `stream`: if `false` the response will be returned as a single response object, rather than a stream of objects
@@ -115,6 +115,19 @@ The final response in the stream also includes additional data about the generat
 - `eval_duration`: time in nanoseconds spent generating the response
 - `context`: an encoding of the conversation used in this response, this can be sent in the next request to keep a conversational memory
 - `response`: empty if the response was streamed, if not streamed, this will contain the full response
+
+TurboQuant-aware responses can also include:
+
+- `resolved_kv_cache_type`, `resolved_kv_cache_type_k`, `resolved_kv_cache_type_v`
+- `requested_mode`, `effective_mode`
+- `fallback_reason`
+- `turboquant_path_kind`
+- `support_tier`
+- `preset_requested`, `preset_resolved`
+- `pairing_validated`
+- `experimental_lane`
+
+If requested and effective modes differ, use the effective mode for comparisons and rollout claims.
 
 To calculate how fast the response is generated in tokens per second (token/s), divide `eval_count` / `eval_duration` \* `10^9`.
 

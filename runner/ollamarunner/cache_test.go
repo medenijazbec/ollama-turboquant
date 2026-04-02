@@ -1039,3 +1039,34 @@ func TestNewInputCacheMarksHybridSupportAsNonNative(t *testing.T) {
 		t.Fatalf("expected hybrid support reason: %+v", info)
 	}
 }
+
+func TestNewInputCacheExposesPresetMetadata(t *testing.T) {
+	t.Setenv("OLLAMA_TURBOQUANT_PRESET", "safe")
+	backend := &runnerTestBackend{
+		supportsTurboQuantFastPath: true,
+		requiresFlashAttention:     true,
+		config: stubConfig{
+			arch: "llama",
+			u32: map[string]uint32{
+				"attention.key_length": 128,
+			},
+		},
+	}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionEnabled, 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := inputCache.RuntimeInfo()
+	if info.PresetRequested != "safe" || info.PresetResolved != "safe" {
+		t.Fatalf("unexpected preset info: %+v", info)
+	}
+	if !info.PairingValidated || info.ExperimentalLane {
+		t.Fatalf("unexpected preset validation flags: %+v", info)
+	}
+	if info.PresetWarning != "" {
+		t.Fatalf("unexpected preset warning: %+v", info)
+	}
+}

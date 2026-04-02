@@ -615,6 +615,11 @@ type Metrics struct {
 	UnsupportedReason         string        `json:"unsupported_reason,omitempty"`
 	HybridKVArchitecture      bool          `json:"hybrid_kv_architecture,omitempty"`
 	NativeTurboQuantAllowed   bool          `json:"native_turboquant_allowed,omitempty"`
+	PresetRequested           string        `json:"preset_requested,omitempty"`
+	PresetResolved            string        `json:"preset_resolved,omitempty"`
+	PresetWarning             string        `json:"preset_warning,omitempty"`
+	PairingValidated          bool          `json:"pairing_validated,omitempty"`
+	ExperimentalLane          bool          `json:"experimental_lane,omitempty"`
 	TQLayoutKind              string        `json:"tq_layout_kind,omitempty"`
 	TQLayoutVersion           int           `json:"tq_layout_version,omitempty"`
 	TQGroupCount              int           `json:"tq_group_count,omitempty"`

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/kvcache"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model"
@@ -72,6 +73,11 @@ type InputCache struct {
 	unsupportedReason         string
 	hybridKVArchitecture      bool
 	nativeTurboQuantAllowed   bool
+	presetRequested           string
+	presetResolved            string
+	presetWarning             string
+	pairingValidated          bool
+	experimentalLane          bool
 	tqBlockSize               int
 	tqLayoutKind              string
 	tqLayoutVersion           int
@@ -132,6 +138,11 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	unsupportedReason := support.UnsupportedReason
 	hybridKVArchitecture := support.HybridKVArchitecture
 	nativeTurboQuantAllowed := support.NativeTurboQuantAllowed
+	presetRequested := string(normalizeTurboQuantRolloutPreset(envconfig.TurboQuantPreset()))
+	presetResolved := ""
+	presetWarning := ""
+	pairingValidated := false
+	experimentalLane := false
 	tqBlockSize := 0
 	tqLayoutKind := ""
 	tqLayoutVersion := 0
@@ -318,6 +329,23 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	}
 	requestedMode := summarizeKVMode(requestedKVCacheTypeK, requestedKVCacheTypeV)
 	effectiveMode := summarizeKVMode(kvCacheEffectiveK, kvCacheEffectiveV)
+	// Implemented rollout-preset guidance so recommendation lanes stay tied to validated mixed-K/V data; idea source: @seanrasch.
+	// Implemented the conservative asymmetric recommendation lane around q8_0-K plus TurboQuant V when validation supports it; idea source: @primoco.
+	// Implemented preset warnings so asymmetric and experimental pairings stay guarded instead of being implied production-safe; idea source: @sjoerdmaessen.
+	recommendation := resolveTurboQuantPreset(presetRequested, support, requestedKVCacheTypeK, requestedKVCacheTypeV, kvCacheEffectiveK, kvCacheEffectiveV, turboQuantPathKind, fallbackReason, faEnabled, vTurboSupported)
+	presetResolved = string(recommendation.Preset)
+	presetWarning = recommendation.Warning
+	pairingValidated = recommendation.PairingValidated
+	experimentalLane = recommendation.ExperimentalLane
+	if presetWarning != "" {
+		slog.Warn("turboquant rollout preset warning",
+			"preset_requested", presetRequested,
+			"preset_resolved", presetResolved,
+			"pairing_validated", pairingValidated,
+			"experimental_lane", experimentalLane,
+			"warning", presetWarning,
+		)
+	}
 
 	return &InputCache{
 		numCtx:                    numCtx,
@@ -365,6 +393,11 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		unsupportedReason:         unsupportedReason,
 		hybridKVArchitecture:      hybridKVArchitecture,
 		nativeTurboQuantAllowed:   nativeTurboQuantAllowed,
+		presetRequested:           presetRequested,
+		presetResolved:            presetResolved,
+		presetWarning:             presetWarning,
+		pairingValidated:          pairingValidated,
+		experimentalLane:          experimentalLane,
 		tqBlockSize:               tqBlockSize,
 		tqLayoutKind:              tqLayoutKind,
 		tqLayoutVersion:           tqLayoutVersion,
@@ -596,6 +629,11 @@ type KVCacheRuntimeInfo struct {
 	UnsupportedReason         string
 	HybridKVArchitecture      bool
 	NativeTurboQuantAllowed   bool
+	PresetRequested           string
+	PresetResolved            string
+	PresetWarning             string
+	PairingValidated          bool
+	ExperimentalLane          bool
 	TQBlockSize               int
 	TQLayoutKind              string
 	TQLayoutVersion           int
@@ -649,6 +687,11 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		UnsupportedReason:         c.unsupportedReason,
 		HybridKVArchitecture:      c.hybridKVArchitecture,
 		NativeTurboQuantAllowed:   c.nativeTurboQuantAllowed,
+		PresetRequested:           c.presetRequested,
+		PresetResolved:            c.presetResolved,
+		PresetWarning:             c.presetWarning,
+		PairingValidated:          c.pairingValidated,
+		ExperimentalLane:          c.experimentalLane,
 		TQBlockSize:               c.tqBlockSize,
 		TQLayoutKind:              c.tqLayoutKind,
 		TQLayoutVersion:           c.tqLayoutVersion,

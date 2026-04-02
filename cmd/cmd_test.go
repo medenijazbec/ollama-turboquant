@@ -586,6 +586,131 @@ func TestRunHandlerWarnsWhenSplitKVOverridesUnifiedTurboQuant(t *testing.T) {
 	}
 }
 
+func TestRunHandlerWarnsOnUnvalidatedAsymmetricPairing(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityCompletion},
+			})
+		case r.URL.Path == "/api/generate" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.GenerateResponse{Done: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	addRunHandlerFlags(cmd)
+	_ = cmd.Flags().Set("cache-type-k", "q4_0")
+	_ = cmd.Flags().Set("cache-type-v", "tq35")
+
+	oldStderr := os.Stderr
+	readErr, writeErr, _ := os.Pipe()
+	os.Stderr = writeErr
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	if err := RunHandler(cmd, []string{"test-model", "hello"}); err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+
+	_ = writeErr.Close()
+	var out bytes.Buffer
+	_, _ = io.Copy(&out, readErr)
+	if !strings.Contains(out.String(), "outside the current validated recommendation set") {
+		t.Fatalf("expected unvalidated pairing warning, got %q", out.String())
+	}
+}
+
+func TestRunHandlerWarnsOnExperimentalTurboQuantMode(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityCompletion},
+			})
+		case r.URL.Path == "/api/generate" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.GenerateResponse{Done: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	addRunHandlerFlags(cmd)
+	_ = cmd.Flags().Set("turboquant", "tq25")
+
+	oldStderr := os.Stderr
+	readErr, writeErr, _ := os.Pipe()
+	os.Stderr = writeErr
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	if err := RunHandler(cmd, []string{"test-model", "hello"}); err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+
+	_ = writeErr.Close()
+	var out bytes.Buffer
+	_, _ = io.Copy(&out, readErr)
+	if !strings.Contains(out.String(), "tq25 remains in the experimental rollout lane") {
+		t.Fatalf("expected experimental tq25 warning, got %q", out.String())
+	}
+}
+
+func TestRunHandlerAllowsValidatedConservativeAsymmetryWithoutWarning(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/show" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.ShowResponse{
+				Capabilities: []model.Capability{model.CapabilityCompletion},
+			})
+		case r.URL.Path == "/api/generate" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(api.GenerateResponse{Done: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("OLLAMA_HOST", mockServer.URL)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	addRunHandlerFlags(cmd)
+	_ = cmd.Flags().Set("cache-type-k", "q8_0")
+	_ = cmd.Flags().Set("cache-type-v", "tq35")
+
+	oldStderr := os.Stderr
+	readErr, writeErr, _ := os.Pipe()
+	os.Stderr = writeErr
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	if err := RunHandler(cmd, []string{"test-model", "hello"}); err != nil {
+		t.Fatalf("RunHandler returned error: %v", err)
+	}
+
+	_ = writeErr.Close()
+	var out bytes.Buffer
+	_, _ = io.Copy(&out, readErr)
+	if strings.Contains(out.String(), "outside the current validated recommendation set") {
+		t.Fatalf("did not expect unvalidated warning, got %q", out.String())
+	}
+}
+
 func TestRunHandlerTurboQuantIgnoredForEmbeddingModels(t *testing.T) {
 	var embedReq api.EmbedRequest
 
