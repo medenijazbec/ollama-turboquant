@@ -69,6 +69,7 @@ func reconstructResidual(dim int, sketch ResidualSketch) []float32 {
 		if bit == 1 {
 			sign = 1
 		}
+		// Residual reconstruction stays on float32 accumulation today; if a backend-specific half path is introduced, it needs an explicit FP32-accumulate audit before rollout.
 		for col := 0; col < dim; col++ {
 			out[col] += sign * gaussianProjectionEntry(sketch.Seed, row, col) * scale
 		}

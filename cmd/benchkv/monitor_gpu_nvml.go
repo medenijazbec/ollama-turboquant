@@ -2,6 +2,8 @@
 
 package main
 
+import "fmt"
+
 import "github.com/NVIDIA/go-nvml/pkg/nvml"
 
 type nvmlPoller struct {
@@ -36,17 +38,24 @@ func newNVMLPoller() (gpuPoller, bool) {
 
 func (p *nvmlPoller) poll() (gpuSample, bool) {
 	var totalUsed uint64
+	var totalVisible uint64
 	var totalUtil float64
 	var samples int
+	perGPUUsed := make(map[string]int64)
+	perGPUFree := make(map[string]int64)
 
-	for _, device := range p.devices {
+	for i, device := range p.devices {
 		memInfo, memRet := device.GetMemoryInfo()
 		utilRates, utilRet := device.GetUtilizationRates()
 		if memRet != nvml.SUCCESS || utilRet != nvml.SUCCESS {
 			continue
 		}
 		totalUsed += memInfo.Used
+		totalVisible += memInfo.Total
 		totalUtil += float64(utilRates.Gpu)
+		key := fmt.Sprintf("%d", i)
+		perGPUUsed[key] = int64(memInfo.Used)
+		perGPUFree[key] = int64(memInfo.Free)
 		samples++
 	}
 	if samples == 0 {
@@ -54,8 +63,12 @@ func (p *nvmlPoller) poll() (gpuSample, bool) {
 	}
 
 	return gpuSample{
-		peakVRAMBytes: int64(totalUsed),
-		meanUtil:      totalUtil / float64(samples),
+		peakVRAMBytes:         int64(totalUsed),
+		meanUtil:              totalUtil / float64(samples),
+		totalVisibleVRAMBytes: int64Ptr(int64(totalVisible)),
+		perGPUUsedBytes:       perGPUUsed,
+		perGPUFreeBytes:       perGPUFree,
+		visibleGPUCount:       samples,
 	}, true
 }
 

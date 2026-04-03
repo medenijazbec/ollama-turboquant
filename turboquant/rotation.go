@@ -59,6 +59,7 @@ func ApplyInverseRotation(y []float32, rot Rotation) []float32 {
 	for row := 0; row < rot.Dim; row++ {
 		yVal := y[row]
 		base := row * rot.Dim
+		// The inverse rotation accumulates in float32 on the reconstruction path; keep this FP32-accumulate behavior explicit while long-generation corruption audits remain active.
 		for col := 0; col < rot.Dim; col++ {
 			out[col] += rot.Matrix[base+col] * yVal
 		}

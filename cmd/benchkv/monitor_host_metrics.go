@@ -15,13 +15,14 @@ type hostMetricsMonitor struct {
 	interval time.Duration
 	enabled  bool
 
-	mu         sync.Mutex
-	available  bool
-	source     string
-	currentRAM int64
-	peakRAM    int64
-	processRSS int64
-	samples    int
+	mu          sync.Mutex
+	available   bool
+	source      string
+	baselineRAM int64
+	currentRAM  int64
+	peakRAM     int64
+	processRSS  int64
+	samples     int
 }
 
 func newHostMetricsMonitor(interval time.Duration, enabled bool) *hostMetricsMonitor {
@@ -64,6 +65,9 @@ func (m *hostMetricsMonitor) poll() {
 	defer m.mu.Unlock()
 	m.available = true
 	m.source = source
+	if m.baselineRAM == 0 {
+		m.baselineRAM = used
+	}
 	m.currentRAM = used
 	if used > m.peakRAM {
 		m.peakRAM = used
@@ -87,6 +91,9 @@ func (m *hostMetricsMonitor) stats() hostMemoryStats {
 		HostRAMUsedBytes: int64Ptr(m.currentRAM),
 		PeakHostRAMBytes: int64Ptr(m.peakRAM),
 		SampleCount:      m.samples,
+	}
+	if m.baselineRAM > 0 && m.peakRAM >= m.baselineRAM {
+		stats.PeakHostRAMDeltaBytes = int64Ptr(m.peakRAM - m.baselineRAM)
 	}
 	if m.processRSS > 0 {
 		stats.ProcessRSSBytes = int64Ptr(m.processRSS)

@@ -134,6 +134,7 @@ func TestHostMetricsStatsKeepSourceAndNilProcessRSS(t *testing.T) {
 	monitor := newHostMetricsMonitor(0, true)
 	monitor.available = true
 	monitor.source = "proc-meminfo"
+	monitor.baselineRAM = 1024
 	monitor.currentRAM = 2048
 	monitor.peakRAM = 4096
 	monitor.samples = 2
@@ -144,5 +145,8 @@ func TestHostMetricsStatsKeepSourceAndNilProcessRSS(t *testing.T) {
 	}
 	if stats.ProcessRSSBytes != nil {
 		t.Fatalf("expected nil process rss, got %+v", stats)
+	}
+	if stats.PeakHostRAMDeltaBytes == nil || *stats.PeakHostRAMDeltaBytes != 3072 {
+		t.Fatalf("unexpected peak host delta: %+v", stats)
 	}
 }

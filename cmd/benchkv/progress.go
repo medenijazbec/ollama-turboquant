@@ -49,7 +49,11 @@ func shouldEnableProgress(mode progressMode, isTTY bool) bool {
 
 func estimateTotalUnits(cfg config) int {
 	total := len(cfg.Hosts)
-	total += len(buildStandardCells(cfg)) * (cfg.Warmup + cfg.Epochs)
+	standardCells := buildStandardCells(cfg)
+	total += len(standardCells) * (cfg.Warmup + cfg.Epochs)
+	if cfg.Profile == "large-context" {
+		total += len(standardCells) * (len(cfg.ContextLadder) - 1) * (cfg.Warmup + cfg.Epochs)
+	}
 	if slicesContainsWorkload(cfg.Workloads, workloadNearOOMStaircase) {
 		staircaseCells := 0
 		hostCount := len(cfg.Hosts)
@@ -84,7 +88,11 @@ func estimateTotalUnitsWithPreflight(cfg config, preflights map[string]hostPrefl
 		if !supportedByPreflight(preflights, cell.Host.BaseURL, cell.KVMode) {
 			continue
 		}
-		total += unitsPerCell
+		multiplier := 1
+		if cfg.Profile == "large-context" {
+			multiplier = max(len(cfg.ContextLadder), 1)
+		}
+		total += unitsPerCell * multiplier
 	}
 
 	if slicesContainsWorkload(cfg.Workloads, workloadNearOOMStaircase) {

@@ -14,17 +14,28 @@ func buildGenerateOptions(host hostTarget, kvMode string, numCtx int, numPredict
 	if kvMode == "" {
 		kvMode = "f16"
 	}
+	kType, vType, ok := splitBenchmarkKVMode(kvMode)
+	if !ok {
+		disposition.Supported = false
+		disposition.Error = fmt.Sprintf("invalid kv mode %q", kvMode)
+		return nil, disposition
+	}
 
 	switch host.KVSupportMode {
 	case hostKVSupportLegacy:
-		if kvMode != "f16" {
+		if kType != "f16" || vType != "f16" {
 			disposition.Supported = false
 			disposition.Error = legacyKVUnsupportedError(kvMode)
 			return nil, disposition
 		}
 		return options, disposition
 	case hostKVSupportRequest:
-		options["kv_cache_type"] = kvMode
+		if kType == vType {
+			options["kv_cache_type"] = kType
+		} else {
+			options["kv_cache_type_k"] = kType
+			options["kv_cache_type_v"] = vType
+		}
 		disposition.RequestedOverride = true
 		if backend := requestedKVBackend(kvMode); backend != "" {
 			options["kv_cache_backend"] = backend

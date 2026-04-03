@@ -155,6 +155,22 @@ func TestNativeGroupedMarshalIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestExperimentalSegmentedHeadDimPlan(t *testing.T) {
+	plan, ok := ExperimentalSegmentedHeadDimPlan(576)
+	if !ok {
+		t.Fatal("expected segmented plan for head_dim=576")
+	}
+	if !plan.Experimental {
+		t.Fatal("expected segmented plan to remain experimental")
+	}
+	if len(plan.Segments) != 3 || plan.Segments[0] != 256 || plan.Segments[1] != 256 || plan.Segments[2] != 64 {
+		t.Fatalf("unexpected segmented plan: %+v", plan)
+	}
+	if _, ok := ExperimentalSegmentedHeadDimPlan(512); ok {
+		t.Fatal("did not expect segmented plan for power-of-two head dim")
+	}
+}
+
 func makeRamp(n int) []float32 {
 	out := make([]float32, n)
 	for i := range out {

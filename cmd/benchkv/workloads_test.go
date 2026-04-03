@@ -87,3 +87,36 @@ func TestSpillProfileBuildsNoStandardCells(t *testing.T) {
 		t.Fatalf("spill profile should not build standard cells, got %d", len(cells))
 	}
 }
+
+func TestMakeWorkloadSpecLargeContext(t *testing.T) {
+	cfg := config{MinFitDecode: 32, StretchContext: 1000000}
+	spec, ok := makeWorkloadSpec(cfg, workloadFitCeiling, 1000000, 1)
+	if !ok {
+		t.Fatal("expected valid fit-ceiling spec")
+	}
+	if spec.MaxTokens != 32 {
+		t.Fatalf("fit-ceiling MaxTokens = %d, want 32", spec.MaxTokens)
+	}
+	spec, ok = makeWorkloadSpec(cfg, workloadDecodeCorruption, 262144, 1)
+	if !ok || spec.MaxTokens != 2048 {
+		t.Fatalf("unexpected decode-corruption spec: %#v", spec)
+	}
+}
+
+func TestBuildLargeContextCells(t *testing.T) {
+	cfg := config{
+		Profile:        "large-context",
+		Hosts:          []hostTarget{{Label: "turbo"}},
+		KVModes:        []string{"f16", "q8_0/tq35", "tq35"},
+		Workloads:      []workloadName{workloadFitCeiling, workloadLongContextRecall},
+		StretchContext: 1000000,
+		MinFitDecode:   32,
+	}
+	cells := buildStandardCells(cfg)
+	if len(cells) != 6 {
+		t.Fatalf("cell count = %d, want 6", len(cells))
+	}
+	if cells[0].Workload.NumCtx != 1000000 {
+		t.Fatalf("first large-context cell num_ctx = %d, want 1000000", cells[0].Workload.NumCtx)
+	}
+}

@@ -42,6 +42,15 @@ func TestWriteCSV(t *testing.T) {
 	if !strings.Contains(string(data), "gpu_stats_source,host_stats_source,validation_kind,validation_status") {
 		t.Fatal("expected telemetry/validation columns in csv header")
 	}
+	if !strings.Contains(string(data), "requested_num_ctx,attempted_num_ctx,effective_num_ctx") {
+		t.Fatal("expected large-context columns in csv header")
+	}
+	if !strings.Contains(string(data), "visible_gpu_count,per_gpu_vram_gib,total_visible_vram_bytes,process_vram_bytes") {
+		t.Fatal("expected per-gpu telemetry columns in csv header")
+	}
+	if !strings.Contains(string(data), "peak_host_ram_delta_bytes,used_host_assist,used_mmap,used_cpu_assist") {
+		t.Fatal("expected host-assist columns in csv header")
+	}
 	if !strings.Contains(string(data), "kv_algo_resolved") {
 		t.Fatal("expected kv algorithm csv header")
 	}
@@ -137,5 +146,39 @@ func TestWriteSummaryExcludesFallbackAndFailedValidationRows(t *testing.T) {
 	}
 	if strings.Contains(string(data), "claim: On the TurboQuant runtime") {
 		t.Fatal("expected summary to exclude fallback or failed-validation claims")
+	}
+}
+
+func TestWriteSummaryIncludesLargeContextSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "summary-large-context.md")
+	rows := []epochAggregate{
+		{
+			HostLabel:        "turbo",
+			KVModeRequested:  "q8_0/tq35",
+			RequestedMode:    "k=q8_0,v=tq35",
+			EffectiveMode:    "k=q8_0,v=tq35",
+			Workload:         string(workloadLongContextRecall),
+			NumCtx:           262144,
+			RequestedNumCtx:  1000000,
+			EffectiveNumCtx:  262144,
+			Concurrency:      1,
+			Status:           statusOK,
+			FullGPUResidency: true,
+			ValidationStatus: string(validationPassed),
+		},
+	}
+	if err := writeSummary(path, rows, nil); err != nil {
+		t.Fatalf("writeSummary failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if !strings.Contains(string(data), "# Large-Context Summary") {
+		t.Fatal("expected large-context summary section")
+	}
+	if !strings.Contains(string(data), "ctx=1000000->262144") {
+		t.Fatal("expected requested->effective context summary")
 	}
 }

@@ -10,6 +10,8 @@ func buildStandardCells(cfg config) []sweepCell {
 		return buildRegressionCells(cfg)
 	case "turbo-benefit":
 		return buildTurboBenefitCells(cfg)
+	case "large-context":
+		return buildLargeContextCells(cfg)
 	case "capacity", "spill", "staircase":
 		return nil
 	}
@@ -112,6 +114,26 @@ func buildImpactCells(cfg config) []sweepCell {
 	return cells
 }
 
+func buildLargeContextCells(cfg config) []sweepCell {
+	var cells []sweepCell
+	for _, host := range cfg.Hosts {
+		for _, kvMode := range cfg.KVModes {
+			for _, workload := range cfg.Workloads {
+				spec, ok := makeWorkloadSpec(cfg, workload, cfg.StretchContext, 1)
+				if !ok {
+					continue
+				}
+				cells = append(cells, sweepCell{
+					Host:     host,
+					KVMode:   kvMode,
+					Workload: spec,
+				})
+			}
+		}
+	}
+	return cells
+}
+
 func expandWorkload(cfg config, workload workloadName) []workloadSpec {
 	var specs []workloadSpec
 	for _, numCtx := range cfg.NumCtx {
@@ -152,6 +174,26 @@ func makeWorkloadSpec(cfg config, workload workloadName, numCtx, concurrency int
 		promptTokens := cmp.Or(cfg.PromptTokens, promptTokensAt90Percent(numCtx))
 		maxTokens := cmp.Or(cfg.MaxTokens, 128)
 		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: concurrency}, true
+	case workloadFitCeiling:
+		promptTokens := cmp.Or(cfg.PromptTokens, promptTokensAt90Percent(numCtx))
+		maxTokens := max(cmp.Or(cfg.MaxTokens, 32), cfg.MinFitDecode)
+		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
+	case workloadLongContextRecall:
+		promptTokens := cmp.Or(cfg.PromptTokens, promptTokensAt90Percent(numCtx))
+		maxTokens := cmp.Or(cfg.MaxTokens, 64)
+		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
+	case workloadLongJSONRetention:
+		promptTokens := cmp.Or(cfg.PromptTokens, promptTokensAt90Percent(numCtx))
+		maxTokens := cmp.Or(cfg.MaxTokens, 96)
+		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
+	case workloadPromptFileRegress:
+		promptTokens := cmp.Or(cfg.PromptTokens, max(320, min(numCtx/2, promptTokensAt90Percent(numCtx))))
+		maxTokens := cmp.Or(cfg.MaxTokens, 96)
+		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
+	case workloadDecodeCorruption:
+		promptTokens := cmp.Or(cfg.PromptTokens, max(512, min(numCtx/2, promptTokensAt90Percent(numCtx))))
+		maxTokens := cmp.Or(cfg.MaxTokens, 2048)
+		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
 	default:
 		return workloadSpec{}, false
 	}

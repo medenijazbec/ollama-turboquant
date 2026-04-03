@@ -41,6 +41,14 @@ type rawFlags struct {
 	jsonlOutput      *string
 	summaryOutput    *string
 	outputDir        *string
+	contextLadder    *string
+	stretchContext   *int
+	minFitDecode     *int
+	promptFile       *string
+	longJSONBytes    *int
+	turboMode        *string
+	targetNativeCtx  *int
+	targetYarnCtx    *int
 	captureOllamaPS  *bool
 	captureGPU       *bool
 	captureRunnerRSS *bool
@@ -75,6 +83,14 @@ func parseFlags() rawFlags {
 		jsonlOutput:      flag.String("jsonl-output", "", "JSONL output path"),
 		summaryOutput:    flag.String("summary-output", "", "Text summary output path"),
 		outputDir:        flag.String("output-dir", "/results", "Output directory for default outputs"),
+		contextLadder:    flag.String("context-ladder", "", "Comma-separated large-context ladder override"),
+		stretchContext:   flag.Int("stretch-context", 1000000, "Top requested large-context target for reporting"),
+		minFitDecode:     flag.Int("min-fit-decode-tokens", 32, "Minimum decode tokens required for a ladder rung to count as fit"),
+		promptFile:       flag.String("prompt-file", "", "Optional file-backed prompt fixture for prompt-file-regression"),
+		longJSONBytes:    flag.Int("long-json-bytes", 16384, "Approximate long JSON payload size for retention validation"),
+		turboMode:        flag.String("turbo-mode", "tq35", "TurboQuant mode to use for large-context mixed/symmetric lanes [tq25|tq35]"),
+		targetNativeCtx:  flag.Int("target-native-context", 0, "Optional advertised native context length for reporting"),
+		targetYarnCtx:    flag.Int("target-yarn-context", 0, "Optional advertised YaRN stretch context length for reporting"),
 		captureOllamaPS:  flag.Bool("capture-ollama-ps", true, "Capture `ollama ps` before and after runs when available"),
 		captureGPU:       flag.Bool("capture-gpu", true, "Capture GPU metrics via NVML or nvidia-smi"),
 		captureRunnerRSS: flag.Bool("capture-runner-rss", true, "Capture runner RSS when possible"),
@@ -85,6 +101,39 @@ func parseFlags() rawFlags {
 }
 
 func loadConfig(r rawFlags) (config, error) {
+	turboModeValue := "tq35"
+	if r.turboMode != nil {
+		turboModeValue = *r.turboMode
+	}
+	contextLadderValue := ""
+	if r.contextLadder != nil {
+		contextLadderValue = *r.contextLadder
+	}
+	promptFileValue := ""
+	if r.promptFile != nil {
+		promptFileValue = *r.promptFile
+	}
+	stretchContextValue := 1000000
+	if r.stretchContext != nil {
+		stretchContextValue = *r.stretchContext
+	}
+	minFitDecodeValue := 32
+	if r.minFitDecode != nil {
+		minFitDecodeValue = *r.minFitDecode
+	}
+	longJSONBytesValue := 16384
+	if r.longJSONBytes != nil {
+		longJSONBytesValue = *r.longJSONBytes
+	}
+	targetNativeCtxValue := 0
+	if r.targetNativeCtx != nil {
+		targetNativeCtxValue = *r.targetNativeCtx
+	}
+	targetYarnCtxValue := 0
+	if r.targetYarnCtx != nil {
+		targetYarnCtxValue = *r.targetYarnCtx
+	}
+
 	if strings.TrimSpace(*r.hosts) == "" {
 		return config{}, errors.New("--hosts is required")
 	}
@@ -93,7 +142,7 @@ func loadConfig(r rawFlags) (config, error) {
 	}
 
 	profile := strings.ToLower(strings.TrimSpace(*r.profile))
-	if !slices.Contains([]string{"quick", "full", "staircase", "impact", "regression", "turbo-benefit", "capacity", "spill"}, profile) {
+	if !slices.Contains([]string{"quick", "full", "staircase", "impact", "regression", "turbo-benefit", "capacity", "spill", "large-context"}, profile) {
 		return config{}, fmt.Errorf("invalid profile %q", *r.profile)
 	}
 
@@ -140,9 +189,14 @@ func loadConfig(r rawFlags) (config, error) {
 		})
 	}
 
+	turboMode, err := normalizeKVMode(turboModeValue)
+	if err != nil {
+		return config{}, fmt.Errorf("invalid --turbo-mode: %w", err)
+	}
+
 	kvModeValue := *r.kvModes
 	if strings.TrimSpace(kvModeValue) == "" {
-		kvModeValue = strings.Join(defaultKVModes(profile), ",")
+		kvModeValue = strings.Join(defaultKVModes(profile, turboMode), ",")
 	}
 	kvModes, err := parseOptionalCSV(kvModeValue)
 	if err != nil {
@@ -152,7 +206,7 @@ func loadConfig(r rawFlags) (config, error) {
 		return config{}, errors.New("--kv-modes must contain at least one mode")
 	}
 	for i := range kvModes {
-		kvModes[i], err = normalizeKVMode(kvModes[i])
+		kvModes[i], err = normalizeBenchmarkKVMode(kvModes[i])
 		if err != nil {
 			return config{}, err
 		}
@@ -182,6 +236,14 @@ func loadConfig(r rawFlags) (config, error) {
 		}
 	}
 
+	contextLadder := defaultContextLadder()
+	if strings.TrimSpace(contextLadderValue) != "" {
+		contextLadder, err = parseIntCSV(contextLadderValue)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid --context-ladder: %w", err)
+		}
+	}
+
 	warmup := profileWarmup(profile)
 	if *r.warmup >= 0 {
 		warmup = *r.warmup
@@ -195,6 +257,7 @@ func loadConfig(r rawFlags) (config, error) {
 		Hosts:            hosts,
 		Model:            *r.model,
 		KVModes:          kvModes,
+		TurboMode:        turboMode,
 		Profile:          profile,
 		Workloads:        workloads,
 		NumCtx:           numCtx,
@@ -214,6 +277,13 @@ func loadConfig(r rawFlags) (config, error) {
 		CaptureGPU:       *r.captureGPU,
 		CaptureRunnerRSS: *r.captureRunnerRSS,
 		OutputDir:        *r.outputDir,
+		ContextLadder:    contextLadder,
+		StretchContext:   stretchContextValue,
+		MinFitDecode:     minFitDecodeValue,
+		PromptFile:       strings.TrimSpace(promptFileValue),
+		LongJSONBytes:    longJSONBytesValue,
+		TargetNativeCtx:  targetNativeCtxValue,
+		TargetYarnCtx:    targetYarnCtxValue,
 		Debug:            *r.debug,
 		ProgressWidth:    *r.progressWidth,
 	}
@@ -285,6 +355,26 @@ func normalizeKVMode(value string) (string, error) {
 	}
 }
 
+func normalizeBenchmarkKVMode(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if strings.Contains(value, "/") {
+		kType, vType, ok := splitBenchmarkKVMode(value)
+		if !ok {
+			return "", fmt.Errorf("invalid kv mode %q", value)
+		}
+		kType, err := normalizeKVMode(kType)
+		if err != nil {
+			return "", err
+		}
+		vType, err = normalizeKVMode(vType)
+		if err != nil {
+			return "", err
+		}
+		return kType + "/" + vType, nil
+	}
+	return normalizeKVMode(value)
+}
+
 func parseCSV(value string) ([]string, error) {
 	parts := strings.Split(value, ",")
 	out := make([]string, 0, len(parts))
@@ -334,7 +424,7 @@ func parseWorkloads(value string) ([]workloadName, error) {
 	for _, part := range parts {
 		w := workloadName(strings.ToLower(strings.TrimSpace(part)))
 		switch w {
-		case workloadPrefillHeavy, workloadDecodeGrowth, workloadParallelAmplifier, workloadNearOOMStaircase:
+		case workloadPrefillHeavy, workloadDecodeGrowth, workloadParallelAmplifier, workloadNearOOMStaircase, workloadFitCeiling, workloadLongContextRecall, workloadLongJSONRetention, workloadPromptFileRegress, workloadDecodeCorruption:
 			out = append(out, w)
 		default:
 			return nil, fmt.Errorf("unknown workload %q", part)
@@ -395,6 +485,8 @@ func profileContexts(profile string) []int {
 		return []int{8192, 16384, 32768, 65536}
 	case "capacity", "spill":
 		return []int{8192, 16384, 32768, 65536}
+	case "large-context":
+		return defaultContextLadder()
 	case "quick":
 		return []int{8192, 16384}
 	case "impact":
@@ -420,6 +512,8 @@ func profileConcurrency(profile string) []int {
 		return []int{1, 2}
 	case "impact":
 		return []int{2, 1}
+	case "large-context":
+		return []int{1}
 	case "full", "staircase":
 		return []int{1, 2, 4}
 	default:
@@ -437,6 +531,8 @@ func profileWorkloads(profile string) []workloadName {
 		return []workloadName{workloadNearOOMStaircase}
 	case "capacity", "spill":
 		return []workloadName{workloadNearOOMStaircase}
+	case "large-context":
+		return []workloadName{workloadFitCeiling, workloadPrefillHeavy, workloadLongContextRecall, workloadDecodeCorruption, workloadPromptFileRegress, workloadLongJSONRetention}
 	case "impact":
 		return []workloadName{workloadPrefillHeavy, workloadDecodeGrowth}
 	default:
@@ -462,20 +558,28 @@ func profileEpochs(profile string) int {
 		return 1
 	case "staircase":
 		return 2
+	case "large-context":
+		return 1
 	default:
 		return 6
 	}
 }
 
-func defaultKVModes(profile string) []string {
+func defaultKVModes(profile string, turboMode string) []string {
 	switch profile {
 	case "regression":
 		return []string{"f16"}
 	case "turbo-benefit", "capacity", "spill":
 		return []string{"f16", "tq25", "tq35"}
+	case "large-context":
+		return []string{"f16", "q8_0", "q8_0/" + turboMode, turboMode}
 	default:
 		return []string{"f16", "q8_0", "q4_0", "tq25", "tq35"}
 	}
+}
+
+func defaultContextLadder() []int {
+	return []int{1000000, 750000, 500000, 262144, 128000, 64000, 32768}
 }
 
 func ensureOutputDirs(cfg config) error {

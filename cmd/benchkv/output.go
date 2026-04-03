@@ -37,6 +37,7 @@ func writeCSV(path string, rows []epochAggregate) error {
 
 	header := []string{
 		"host", "host_label", "server_version", "model", "quant", "kv_mode_requested", "kv_mode_requested_k", "kv_mode_requested_v", "kv_mode_resolved", "kv_mode_resolved_k", "kv_mode_resolved_v", "requested_mode", "effective_mode", "kv_algo_resolved", "kv_algo_resolved_k", "kv_algo_resolved_v", "kv_path", "kv_path_k", "kv_path_v", "kv_symmetric", "kv_asymmetric", "fallback_applied", "k_only_fallback", "fallback_reason", "turboquant_path_kind", "native_turboquant_active", "reference_turboquant_active", "fa_enabled", "fa_required_for_v_turbo", "v_turbo_supported", "detected_head_dim", "architecture_class", "support_tier", "hybrid_kv_architecture", "tq_block_size", "gpu_stats_source", "host_stats_source", "validation_kind", "validation_status", "validation_expected", "validation_observed", "validation_error",
+		"requested_num_ctx", "attempted_num_ctx", "effective_num_ctx", "requested_context_top_rung", "context_ladder_index", "context_fallback_reason", "context_fallback_detail", "context_fallback_stage", "context_fallback_class", "ladder_rejected_rungs", "model_file_size_bytes", "estimated_kv_footprint_bytes", "visible_gpu_count", "per_gpu_vram_gib", "total_visible_vram_bytes", "process_vram_bytes", "peak_host_ram_delta_bytes", "used_host_assist", "used_mmap", "used_cpu_assist", "long_context_cap_source", "native_context_advertised", "yarn_context_advertised", "validation_corruption_markers",
 		"workload", "num_ctx", "concurrency", "prompt_tokens_target", "prompt_eval_count", "max_tokens", "eval_count",
 		"generated_tokens", "live_kv_tokens_total", "ctx_x_conc", "epoch", "warmup", "prefill_tps", "decode_tps",
 		"ttft_ms_mean", "ttft_ms_p95", "load_ms", "total_ms", "wall_ms", "peak_vram_bytes", "avg_gpu_util", "peak_gpu_util",
@@ -92,6 +93,30 @@ func writeCSV(path string, rows []epochAggregate) error {
 			row.ValidationExpected,
 			row.ValidationObserved,
 			row.ValidationError,
+			fmt.Sprintf("%d", row.RequestedNumCtx),
+			fmt.Sprintf("%d", row.AttemptedNumCtx),
+			fmt.Sprintf("%d", row.EffectiveNumCtx),
+			fmt.Sprintf("%d", row.RequestedContextTopRung),
+			fmt.Sprintf("%d", row.ContextLadderIndex),
+			row.ContextFallbackReason,
+			row.ContextFallbackDetail,
+			row.ContextFallbackStage,
+			row.ContextFallbackClass,
+			row.LadderRejectedRungs,
+			formatInt64CSV(row.ModelFileSizeBytes),
+			formatInt64CSV(row.EstimatedKVFootprintBytes),
+			fmt.Sprintf("%d", row.VisibleGPUCount),
+			row.PerGPUVRAMGiB,
+			formatInt64CSV(row.TotalVisibleVRAMBytes),
+			formatInt64CSV(row.ProcessVRAMBytes),
+			formatInt64CSV(row.PeakHostRAMDeltaBytes),
+			fmt.Sprintf("%t", row.UsedHostAssist),
+			fmt.Sprintf("%t", row.UsedMMap),
+			fmt.Sprintf("%t", row.UsedCPUAssist),
+			row.LongContextCapSource,
+			fmt.Sprintf("%d", row.NativeContextAdvertised),
+			fmt.Sprintf("%d", row.YarnContextAdvertised),
+			row.ValidationCorruptionMarks,
 			row.Workload,
 			fmt.Sprintf("%d", row.NumCtx),
 			fmt.Sprintf("%d", row.Concurrency),
@@ -165,6 +190,9 @@ func writeSummary(path string, rows []epochAggregate, staircases []staircaseReco
 		return row.Workload == string(workloadNearOOMStaircase)
 	})
 	writeCapacitySummary(&b, staircases)
+
+	b.WriteString("\n# Large-Context Summary\n\n")
+	writeLargeContextSummary(&b, rows)
 
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
@@ -352,6 +380,35 @@ func writeCapacitySummary(b *strings.Builder, staircases []staircaseRecord) {
 	}
 }
 
+func writeLargeContextSummary(b *strings.Builder, rows []epochAggregate) {
+	grouped := summarizeRows(rows, func(row epochAggregate) bool {
+		if row.Warmup || row.Status != statusOK || row.FallbackApplied || row.ValidationStatus == string(validationFailed) {
+			return false
+		}
+		return row.RequestedNumCtx > 0 || isLargeContextWorkload(workloadName(row.Workload))
+	})
+	if len(grouped) == 0 {
+		b.WriteString("- no large-context rows available\n")
+		return
+	}
+
+	for _, group := range grouped {
+		b.WriteString(fmt.Sprintf(
+			"- %s | %s | req=%s eff=%s | ctx=%d->%d | prefill=%.2f tok/s | decode=%.2f tok/s | host_ram=%s | vram=%s | status=ok\n",
+			group.HostLabel,
+			group.Workload,
+			group.RequestedMode,
+			group.EffectiveMode,
+			group.RequestedNumCtx,
+			group.EffectiveNumCtx,
+			group.PrefillTPS,
+			group.DecodeTPS,
+			formatInt64Summary(group.PeakHostRAMBytes),
+			formatInt64Summary(group.PeakVRAMBytes),
+		))
+	}
+}
+
 type summaryGroup struct {
 	Host              string
 	HostLabel         string
@@ -359,6 +416,7 @@ type summaryGroup struct {
 	Model             string
 	Quant             string
 	KVModeRequested   string
+	RequestedMode     string
 	EffectiveMode     string
 	Workload          string
 	NumCtx            int
@@ -370,6 +428,8 @@ type summaryGroup struct {
 	LiveKVTokensTotal int
 	PeakVRAMBytes     *int64
 	PeakHostRAMBytes  *int64
+	RequestedNumCtx   int
+	EffectiveNumCtx   int
 	SupportedCount    int
 }
 
@@ -387,16 +447,19 @@ type comparisonPair struct {
 
 func summarizeRows(rows []epochAggregate, include func(epochAggregate) bool) []summaryGroup {
 	type key struct {
-		host        string
-		hostLabel   string
-		version     string
-		model       string
-		quant       string
-		kvMode      string
-		effective   string
-		workload    string
-		numCtx      int
-		concurrency int
+		host            string
+		hostLabel       string
+		version         string
+		model           string
+		quant           string
+		kvMode          string
+		requestedMode   string
+		effective       string
+		workload        string
+		numCtx          int
+		concurrency     int
+		requestedNumCtx int
+		effectiveNumCtx int
 	}
 	type acc struct {
 		count         int
@@ -414,7 +477,7 @@ func summarizeRows(rows []epochAggregate, include func(epochAggregate) bool) []s
 		if !include(row) {
 			continue
 		}
-		k := key{row.Host, row.HostLabel, row.ServerVersion, row.Model, row.Quant, row.KVModeRequested, row.EffectiveMode, row.Workload, row.NumCtx, row.Concurrency}
+		k := key{row.Host, row.HostLabel, row.ServerVersion, row.Model, row.Quant, row.KVModeRequested, row.RequestedMode, row.EffectiveMode, row.Workload, row.NumCtx, row.Concurrency, row.RequestedNumCtx, row.EffectiveNumCtx}
 		if m[k] == nil {
 			m[k] = &acc{}
 		}
@@ -444,6 +507,7 @@ func summarizeRows(rows []epochAggregate, include func(epochAggregate) bool) []s
 			Model:             k.model,
 			Quant:             k.quant,
 			KVModeRequested:   k.kvMode,
+			RequestedMode:     k.requestedMode,
 			EffectiveMode:     firstNonEmpty(k.effective, k.kvMode),
 			Workload:          k.workload,
 			NumCtx:            k.numCtx,
@@ -455,6 +519,8 @@ func summarizeRows(rows []epochAggregate, include func(epochAggregate) bool) []s
 			LiveKVTokensTotal: int(v.liveKV / float64(v.count)),
 			PeakVRAMBytes:     v.peakVRAMBytes,
 			PeakHostRAMBytes:  v.peakHostRAM,
+			RequestedNumCtx:   k.requestedNumCtx,
+			EffectiveNumCtx:   k.effectiveNumCtx,
 			SupportedCount:    v.count,
 		})
 	}

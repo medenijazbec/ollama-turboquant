@@ -95,6 +95,7 @@ func preflightTimeout(runTimeout time.Duration) time.Duration {
 }
 
 func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText string) (workerResult, epochAggregate) {
+	requestedK, requestedV, _ := splitBenchmarkKVMode(cell.KVMode)
 	row := workerResult{
 		Host:               cell.Host.BaseURL,
 		HostLabel:          cell.Host.Label,
@@ -102,10 +103,10 @@ func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText
 		Model:              cfg.Model,
 		Quant:              preflight.ModelQuant,
 		KVModeRequested:    cell.KVMode,
-		KVModeRequestedK:   cell.KVMode,
-		KVModeRequestedV:   cell.KVMode,
-		RequestedMode:      cell.KVMode,
-		EffectiveMode:      cell.KVMode,
+		KVModeRequestedK:   requestedK,
+		KVModeRequestedV:   requestedV,
+		RequestedMode:      summarizeRequestedOrEffectiveMode(requestedK, requestedV),
+		EffectiveMode:      summarizeRequestedOrEffectiveMode(requestedK, requestedV),
 		KVBackendRequested: requestedKVBackend(cell.KVMode),
 		KVAlgoResolved:     firstNonEmpty(kvAlgoForRequestedMode(cell.KVMode), "unknown"),
 		KVPath:             "unknown",
@@ -124,6 +125,9 @@ func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText
 		Error:              errText,
 		RecordedAt:         time.Now().UTC(),
 	}
+	row.RequestedNumCtx = cell.Workload.NumCtx
+	row.AttemptedNumCtx = cell.Workload.NumCtx
+	row.EffectiveNumCtx = cell.Workload.NumCtx
 	agg := epochAggregate{
 		Host:               row.Host,
 		HostLabel:          row.HostLabel,
@@ -155,6 +159,9 @@ func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText
 }
 
 func runCell(cfg config, cell sweepCell, promptGen *promptGenerator, preflight hostPreflight, tracker *progressTracker) ([]workerResult, []epochAggregate, error) {
+	if cfg.Profile == "large-context" || isLargeContextWorkload(cell.Workload.Name) {
+		return runLargeContextCell(cfg, cell, promptGen, preflight, tracker)
+	}
 	cal, err := promptGen.promptForTarget(context.Background(), cell.Host, cfg.Model, cell.Workload.PromptTokensTarget, max(cell.Workload.NumCtx, 4096), cfg.Timeout)
 	if err != nil {
 		return nil, nil, err
@@ -387,10 +394,15 @@ func runEpoch(cfg config, cell sweepCell, preflight hostPreflight, cal promptCal
 		results[i].PeakVRAMBytes = stats.PeakVRAMBytes
 		results[i].AvgGPUUtil = stats.AvgGPUUtil
 		results[i].PeakGPUUtil = stats.PeakGPUUtil
+		results[i].VisibleGPUCount = stats.VisibleGPUCount
+		results[i].TotalVisibleVRAMBytes = stats.TotalVisibleVRAMBytes
+		results[i].ProcessVRAMBytes = stats.ProcessVRAMBytes
+		results[i].PerGPUVRAMGiB = formatPerGPUVRAMGiB(stats.PerGPUUsedBytes)
 		results[i].HostMetricsAvailable = hostStats.Available
 		results[i].HostStatsSource = hostStats.Source
 		results[i].HostRAMUsedBytes = hostStats.HostRAMUsedBytes
 		results[i].PeakHostRAMBytes = hostStats.PeakHostRAMBytes
+		results[i].PeakHostRAMDeltaBytes = hostStats.PeakHostRAMDeltaBytes
 		if hostStats.ProcessRSSBytes != nil {
 			results[i].RunnerRSSBytes = *hostStats.ProcessRSSBytes
 		} else if cfg.CaptureRunnerRSS {
@@ -406,38 +418,50 @@ func runEpoch(cfg config, cell sweepCell, preflight hostPreflight, cal promptCal
 			results[i].Spilled = spilled
 			results[i].GPUOffloadRegression = offloadRegression
 		}
+		results[i].UsedHostAssist, results[i].UsedMMap, results[i].UsedCPUAssist = deriveAssistFlags(results[i])
 	}
 
 	return results, aggregateEpoch(results, time.Since(start))
 }
 
 func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, warmup bool, workerIndex int) workerResult {
+	requestedK, requestedV, _ := splitBenchmarkKVMode(cell.KVMode)
 	row := workerResult{
-		Host:               cell.Host.BaseURL,
-		HostLabel:          cell.Host.Label,
-		Model:              cfg.Model,
-		KVModeRequested:    cell.KVMode,
-		KVModeRequestedK:   cell.KVMode,
-		KVModeRequestedV:   cell.KVMode,
-		KVBackendRequested: requestedKVBackend(cell.KVMode),
-		Workload:           string(cell.Workload.Name),
-		NumCtx:             cell.Workload.NumCtx,
-		PromptTokensTarget: cell.Workload.PromptTokensTarget,
-		MaxTokens:          cell.Workload.MaxTokens,
-		CtxXConc:           cell.Workload.NumCtx * cell.Workload.Concurrency,
-		Concurrency:        cell.Workload.Concurrency,
-		WorkerIndex:        workerIndex,
-		Epoch:              epoch,
-		Warmup:             warmup,
-		RunnerRSSBytes:     -1,
-		GPUResidency:       "unknown",
-		GPUStatsSource:     "unavailable",
-		HostStatsSource:    "unavailable",
-		Status:             statusFailed,
-		RecordedAt:         time.Now().UTC(),
+		Host:                    cell.Host.BaseURL,
+		HostLabel:               cell.Host.Label,
+		Model:                   cfg.Model,
+		KVModeRequested:         cell.KVMode,
+		KVModeRequestedK:        requestedK,
+		KVModeRequestedV:        requestedV,
+		KVBackendRequested:      requestedKVBackend(cell.KVMode),
+		RequestedMode:           summarizeRequestedOrEffectiveMode(requestedK, requestedV),
+		Workload:                string(cell.Workload.Name),
+		NumCtx:                  cell.Workload.NumCtx,
+		RequestedNumCtx:         cell.Workload.NumCtx,
+		AttemptedNumCtx:         cell.Workload.NumCtx,
+		RequestedContextTopRung: cell.Workload.NumCtx,
+		PromptTokensTarget:      cell.Workload.PromptTokensTarget,
+		MaxTokens:               cell.Workload.MaxTokens,
+		CtxXConc:                cell.Workload.NumCtx * cell.Workload.Concurrency,
+		Concurrency:             cell.Workload.Concurrency,
+		WorkerIndex:             workerIndex,
+		Epoch:                   epoch,
+		Warmup:                  warmup,
+		RunnerRSSBytes:          -1,
+		GPUResidency:            "unknown",
+		GPUStatsSource:          "unavailable",
+		HostStatsSource:         "unavailable",
+		Status:                  statusFailed,
+		RecordedAt:              time.Now().UTC(),
 	}
 
-	prompt := renderWorkerPrompt(cal, epoch, workerIndex)
+	prompt, promptErr := buildWorkerPrompt(cfg, cell, cal, epoch, workerIndex)
+	if promptErr != nil {
+		row.Status = statusFailed
+		row.Success = boolPtr(false)
+		row.Error = promptErr.Error()
+		return row
+	}
 	stream := cfg.Stream
 	keepAlive := api.Duration{Duration: cfg.KeepAlive}
 	options, disposition := buildGenerateOptions(cell.Host, cell.KVMode, cell.Workload.NumCtx, cell.Workload.MaxTokens, cfg.Seed, cfg.Temperature)
@@ -550,6 +574,9 @@ func runWorker(cfg config, cell sweepCell, cal promptCalibration, epoch int, war
 	row.ValidationExpected = validation.Expected
 	row.ValidationObserved = validation.Observed
 	row.ValidationError = validation.Error
+	if validation.Kind == validationDecodeCorruptionGuard || validation.Kind == validationPromptFileRegression {
+		row.ValidationCorruptionMarks = strings.Join(detectCorruptionMarkers(validation.Observed), ",")
+	}
 	if row.Status == statusOK && validation.Status == validationFailed {
 		row.Status = statusFailed
 		row.Success = boolPtr(false)
@@ -626,6 +653,30 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		ValidationObserved:        rows[0].ValidationObserved,
 		ValidationExpected:        rows[0].ValidationExpected,
 		ValidationError:           rows[0].ValidationError,
+		RequestedNumCtx:           rows[0].RequestedNumCtx,
+		AttemptedNumCtx:           rows[0].AttemptedNumCtx,
+		EffectiveNumCtx:           rows[0].EffectiveNumCtx,
+		RequestedContextTopRung:   rows[0].RequestedContextTopRung,
+		ContextLadderIndex:        rows[0].ContextLadderIndex,
+		ContextFallbackReason:     rows[0].ContextFallbackReason,
+		ContextFallbackDetail:     rows[0].ContextFallbackDetail,
+		ContextFallbackStage:      rows[0].ContextFallbackStage,
+		ContextFallbackClass:      rows[0].ContextFallbackClass,
+		LadderRejectedRungs:       rows[0].LadderRejectedRungs,
+		ModelFileSizeBytes:        rows[0].ModelFileSizeBytes,
+		EstimatedKVFootprintBytes: rows[0].EstimatedKVFootprintBytes,
+		VisibleGPUCount:           rows[0].VisibleGPUCount,
+		PerGPUVRAMGiB:             rows[0].PerGPUVRAMGiB,
+		TotalVisibleVRAMBytes:     rows[0].TotalVisibleVRAMBytes,
+		ProcessVRAMBytes:          rows[0].ProcessVRAMBytes,
+		PeakHostRAMDeltaBytes:     rows[0].PeakHostRAMDeltaBytes,
+		UsedHostAssist:            rows[0].UsedHostAssist,
+		UsedMMap:                  rows[0].UsedMMap,
+		UsedCPUAssist:             rows[0].UsedCPUAssist,
+		LongContextCapSource:      rows[0].LongContextCapSource,
+		NativeContextAdvertised:   rows[0].NativeContextAdvertised,
+		YarnContextAdvertised:     rows[0].YarnContextAdvertised,
+		ValidationCorruptionMarks: rows[0].ValidationCorruptionMarks,
 		Workload:                  rows[0].Workload,
 		NumCtx:                    rows[0].NumCtx,
 		PromptTokensTarget:        rows[0].PromptTokensTarget,
@@ -692,6 +743,15 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		if ptrInt64Value(row.PeakHostRAMBytes) > ptrInt64Value(agg.PeakHostRAMBytes) {
 			agg.PeakHostRAMBytes = row.PeakHostRAMBytes
 		}
+		if ptrInt64Value(row.PeakHostRAMDeltaBytes) > ptrInt64Value(agg.PeakHostRAMDeltaBytes) {
+			agg.PeakHostRAMDeltaBytes = row.PeakHostRAMDeltaBytes
+		}
+		if ptrInt64Value(row.TotalVisibleVRAMBytes) > ptrInt64Value(agg.TotalVisibleVRAMBytes) {
+			agg.TotalVisibleVRAMBytes = row.TotalVisibleVRAMBytes
+		}
+		if ptrInt64Value(row.ProcessVRAMBytes) > ptrInt64Value(agg.ProcessVRAMBytes) {
+			agg.ProcessVRAMBytes = row.ProcessVRAMBytes
+		}
 		if ptrInt64Value(row.HostRAMUsedBytes) > ptrInt64Value(agg.HostRAMUsedBytes) {
 			agg.HostRAMUsedBytes = row.HostRAMUsedBytes
 		}
@@ -740,6 +800,42 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 		agg.GPUMetricsAvailable = agg.GPUMetricsAvailable || row.GPUMetricsAvailable
 		agg.HostMetricsAvailable = agg.HostMetricsAvailable || row.HostMetricsAvailable
 		agg.Spilled = agg.Spilled || row.Spilled
+		agg.UsedHostAssist = agg.UsedHostAssist || row.UsedHostAssist
+		agg.UsedMMap = agg.UsedMMap || row.UsedMMap
+		agg.UsedCPUAssist = agg.UsedCPUAssist || row.UsedCPUAssist
+		if row.VisibleGPUCount > agg.VisibleGPUCount {
+			agg.VisibleGPUCount = row.VisibleGPUCount
+		}
+		if agg.PerGPUVRAMGiB == "" {
+			agg.PerGPUVRAMGiB = row.PerGPUVRAMGiB
+		}
+		if agg.LongContextCapSource == "" {
+			agg.LongContextCapSource = row.LongContextCapSource
+		}
+		if row.NativeContextAdvertised > agg.NativeContextAdvertised {
+			agg.NativeContextAdvertised = row.NativeContextAdvertised
+		}
+		if row.YarnContextAdvertised > agg.YarnContextAdvertised {
+			agg.YarnContextAdvertised = row.YarnContextAdvertised
+		}
+		if agg.ValidationCorruptionMarks == "" {
+			agg.ValidationCorruptionMarks = row.ValidationCorruptionMarks
+		}
+		if agg.LadderRejectedRungs == "" {
+			agg.LadderRejectedRungs = row.LadderRejectedRungs
+		}
+		if agg.ContextFallbackReason == "" {
+			agg.ContextFallbackReason = row.ContextFallbackReason
+		}
+		if agg.ContextFallbackDetail == "" {
+			agg.ContextFallbackDetail = row.ContextFallbackDetail
+		}
+		if agg.ContextFallbackStage == "" {
+			agg.ContextFallbackStage = row.ContextFallbackStage
+		}
+		if agg.ContextFallbackClass == "" {
+			agg.ContextFallbackClass = row.ContextFallbackClass
+		}
 		if agg.ProcessorStateBefore == "" {
 			agg.ProcessorStateBefore = row.ProcessorStateBefore
 		}
@@ -780,7 +876,7 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 }
 
 func requestedKVBackend(kvMode string) string {
-	if strings.HasPrefix(kvMode, "tq") {
+	if benchmarkModeUsesTurbo(kvMode) {
 		return "cuda"
 	}
 	return ""
@@ -807,12 +903,14 @@ func uniqueOrMixed(values []string) string {
 
 func validateResolvedKVModes(row workerResult) error {
 	requested := firstNonEmpty(row.KVModeRequested, "f16")
+	requestedK, requestedV, _ := splitBenchmarkKVMode(requested)
 	resolved := firstNonEmpty(row.KVModeResolved, "")
-	requested = firstNonEmpty(requested, "f16")
-	if requested == "f16" {
+	resolvedK := firstNonEmpty(row.KVModeResolvedK, resolved)
+	resolvedV := firstNonEmpty(row.KVModeResolvedV, resolved)
+	if requestedK == "f16" && requestedV == "f16" {
 		return nil
 	}
-	if isTurboQuantMode(row.KVModeRequestedV) && !strings.EqualFold(firstNonEmpty(row.KVModeRequestedV, "f16"), firstNonEmpty(row.KVModeResolvedV, "f16")) {
+	if isTurboQuantMode(row.KVModeRequestedV) && !strings.EqualFold(firstNonEmpty(row.KVModeRequestedV, "f16"), firstNonEmpty(resolvedV, "f16")) {
 		if !row.FallbackApplied {
 			return errors.New("requested V turboquant downgraded without fallback metadata")
 		}
@@ -828,10 +926,13 @@ func validateResolvedKVModes(row workerResult) error {
 		}
 		return nil
 	}
-	if resolved == "" || resolved == "f16" {
+	if resolved == "" || (resolved == "f16" && resolvedK == "f16" && resolvedV == "f16") {
 		return errors.New("requested kv mode did not resolve at runtime")
 	}
-	if resolved != requested {
+	if !strings.EqualFold(requestedK, firstNonEmpty(resolvedK, "f16")) || !strings.EqualFold(requestedV, firstNonEmpty(resolvedV, "f16")) {
+		if row.FallbackApplied {
+			return nil
+		}
 		return fmt.Errorf("requested kv mode %s resolved as %s", requested, resolved)
 	}
 	if isTurboQuantMode(row.KVModeRequestedV) {
@@ -868,7 +969,7 @@ func isTurboQuantMode(mode string) bool {
 }
 
 func kvAlgoForRequestedMode(kvMode string) string {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(kvMode)), "tq") {
+	if benchmarkModeUsesTurbo(kvMode) {
 		return turboquant.AlgorithmPaper
 	}
 	return ""

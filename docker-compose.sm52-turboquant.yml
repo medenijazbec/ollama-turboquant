@@ -32,8 +32,8 @@ services:
       OLLAMA_KEEP_ALIVE: "24h"
       OLLAMA_GPU_OVERHEAD: "4294967296"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "GPU-20f64fae-c389-2af3-6e09-f6303e233fcc,GPU-c9a9a3b6-f8e8-b0e1-7fd6-c116b43a4cb2"
-      NVIDIA_VISIBLE_DEVICES: "GPU-20f64fae-c389-2af3-6e09-f6303e233fcc,GPU-c9a9a3b6-f8e8-b0e1-7fd6-c116b43a4cb2"
+      CUDA_VISIBLE_DEVICES: "all"
+      NVIDIA_VISIBLE_DEVICES: "all"
     shm_size: "16g"
     ulimits:
       memlock: -1

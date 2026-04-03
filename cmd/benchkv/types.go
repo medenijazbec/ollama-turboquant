@@ -16,6 +16,11 @@ const (
 	workloadDecodeGrowth      workloadName = "decode-growth"
 	workloadParallelAmplifier workloadName = "parallel-amplifier"
 	workloadNearOOMStaircase  workloadName = "near-oom-staircase"
+	workloadFitCeiling        workloadName = "fit-ceiling"
+	workloadLongContextRecall workloadName = "long-context-recall"
+	workloadLongJSONRetention workloadName = "long-json-retention"
+	workloadPromptFileRegress workloadName = "prompt-file-regression"
+	workloadDecodeCorruption  workloadName = "decode-corruption-guard"
 )
 
 type hostTarget struct {
@@ -30,6 +35,7 @@ type config struct {
 	Hosts            []hostTarget
 	Model            string
 	KVModes          []string
+	TurboMode        string
 	Profile          string
 	Workloads        []workloadName
 	NumCtx           []int
@@ -52,6 +58,13 @@ type config struct {
 	JSONLPath        string
 	SummaryPath      string
 	OutputDir        string
+	ContextLadder    []int
+	StretchContext   int
+	MinFitDecode     int
+	PromptFile       string
+	LongJSONBytes    int
+	TargetNativeCtx  int
+	TargetYarnCtx    int
 	Debug            bool
 	ProgressMode     progressMode
 	ProgressWidth    int
@@ -156,6 +169,30 @@ type workerResult struct {
 	ValidationObserved        string       `json:"validation_observed,omitempty"`
 	ValidationExpected        string       `json:"validation_expected,omitempty"`
 	ValidationError           string       `json:"validation_error,omitempty"`
+	RequestedNumCtx           int          `json:"requested_num_ctx,omitempty"`
+	AttemptedNumCtx           int          `json:"attempted_num_ctx,omitempty"`
+	EffectiveNumCtx           int          `json:"effective_num_ctx,omitempty"`
+	RequestedContextTopRung   int          `json:"requested_context_top_rung,omitempty"`
+	ContextLadderIndex        int          `json:"context_ladder_index,omitempty"`
+	ContextFallbackReason     string       `json:"context_fallback_reason,omitempty"`
+	ContextFallbackDetail     string       `json:"context_fallback_detail,omitempty"`
+	ContextFallbackStage      string       `json:"context_fallback_stage,omitempty"`
+	ContextFallbackClass      string       `json:"context_fallback_class,omitempty"`
+	LadderRejectedRungs       string       `json:"ladder_rejected_rungs,omitempty"`
+	ModelFileSizeBytes        *int64       `json:"model_file_size_bytes,omitempty"`
+	EstimatedKVFootprintBytes *int64       `json:"estimated_kv_footprint_bytes,omitempty"`
+	VisibleGPUCount           int          `json:"visible_gpu_count,omitempty"`
+	PerGPUVRAMGiB             string       `json:"per_gpu_vram_gib,omitempty"`
+	TotalVisibleVRAMBytes     *int64       `json:"total_visible_vram_bytes,omitempty"`
+	ProcessVRAMBytes          *int64       `json:"process_vram_bytes,omitempty"`
+	PeakHostRAMDeltaBytes     *int64       `json:"peak_host_ram_delta_bytes,omitempty"`
+	UsedHostAssist            bool         `json:"used_host_assist"`
+	UsedMMap                  bool         `json:"used_mmap"`
+	UsedCPUAssist             bool         `json:"used_cpu_assist"`
+	LongContextCapSource      string       `json:"long_context_cap_source,omitempty"`
+	NativeContextAdvertised   int          `json:"native_context_advertised,omitempty"`
+	YarnContextAdvertised     int          `json:"yarn_context_advertised,omitempty"`
+	ValidationCorruptionMarks string       `json:"validation_corruption_markers,omitempty"`
 	Workload                  string       `json:"workload"`
 	NumCtx                    int          `json:"num_ctx"`
 	PromptTokensTarget        int          `json:"prompt_tokens_target"`
@@ -244,6 +281,30 @@ type epochAggregate struct {
 	ValidationObserved        string
 	ValidationExpected        string
 	ValidationError           string
+	RequestedNumCtx           int
+	AttemptedNumCtx           int
+	EffectiveNumCtx           int
+	RequestedContextTopRung   int
+	ContextLadderIndex        int
+	ContextFallbackReason     string
+	ContextFallbackDetail     string
+	ContextFallbackStage      string
+	ContextFallbackClass      string
+	LadderRejectedRungs       string
+	ModelFileSizeBytes        *int64
+	EstimatedKVFootprintBytes *int64
+	VisibleGPUCount           int
+	PerGPUVRAMGiB             string
+	TotalVisibleVRAMBytes     *int64
+	ProcessVRAMBytes          *int64
+	PeakHostRAMDeltaBytes     *int64
+	UsedHostAssist            bool
+	UsedMMap                  bool
+	UsedCPUAssist             bool
+	LongContextCapSource      string
+	NativeContextAdvertised   int
+	YarnContextAdvertised     int
+	ValidationCorruptionMarks string
 	Workload                  string
 	NumCtx                    int
 	PromptTokensTarget        int
@@ -300,22 +361,27 @@ type staircaseRecord struct {
 }
 
 type gpuStats struct {
-	Available        bool
-	Source           string
-	PeakVRAMBytes    *int64
-	AvgGPUUtil       *float64
-	PeakGPUUtil      *float64
-	ProcessVRAMBytes *int64
-	SampleCount      int
+	Available             bool
+	Source                string
+	PeakVRAMBytes         *int64
+	AvgGPUUtil            *float64
+	PeakGPUUtil           *float64
+	ProcessVRAMBytes      *int64
+	TotalVisibleVRAMBytes *int64
+	PerGPUUsedBytes       map[string]int64
+	PerGPUFreeBytes       map[string]int64
+	VisibleGPUCount       int
+	SampleCount           int
 }
 
 type hostMemoryStats struct {
-	Available        bool
-	Source           string
-	HostRAMUsedBytes *int64
-	PeakHostRAMBytes *int64
-	ProcessRSSBytes  *int64
-	SampleCount      int
+	Available             bool
+	Source                string
+	HostRAMUsedBytes      *int64
+	PeakHostRAMBytes      *int64
+	PeakHostRAMDeltaBytes *int64
+	ProcessRSSBytes       *int64
+	SampleCount           int
 }
 
 type progressMode string

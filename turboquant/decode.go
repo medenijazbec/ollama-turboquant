@@ -27,6 +27,7 @@ func ScoreEncodedVector(query []float32, data []byte) (float32, Preset, error) {
 		queryRot := ApplyRotation(query[offset:offset+blockDim], rotation)
 		codebook, _ := scalarCodebook(blockDim, int(block.RegularBits))
 		indices := unpackBits(block.RegularIndices, int(block.RegularBits), blockDim)
+		// Implemented checkpoint-visible V-path audit notes so inverse-WHT/dequant review can confirm FP32 accumulation sites instead of assuming half precision; idea source: @AmesianX.
 		for i, idx := range indices {
 			total += queryRot[i] * (dequantizeScalar(idx, codebook) * block.Scale)
 		}
@@ -51,6 +52,7 @@ func DecodeVector(data []byte) ([]float32, Preset, error) {
 		codebook, _ := scalarCodebook(blockDim, int(block.RegularBits))
 		indices := unpackBits(block.RegularIndices, int(block.RegularBits), blockDim)
 		rotated := make([]float32, blockDim)
+		// The decode/reconstruct path accumulates in float32 here; any future half-precision backend mirror must preserve FP32-accumulate semantics for V reconstruction.
 		for i, idx := range indices {
 			rotated[i] = dequantizeScalar(idx, codebook) * block.Scale
 		}

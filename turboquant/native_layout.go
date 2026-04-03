@@ -19,6 +19,27 @@ const (
 	nativeLayoutMagic   = "TQNG"
 )
 
+type SegmentedHeadDimPlan struct {
+	HeadDim      int
+	Segments     []int
+	Experimental bool
+}
+
+// Implemented scaffold-only segmented head-dim metadata so non-power-of-2 lanes stay explicit instead of being silently promoted; idea source: @AmesianX.
+func ExperimentalSegmentedHeadDimPlan(headDim int) (SegmentedHeadDimPlan, bool) {
+	switch headDim {
+	case 576:
+		// TODO: thread segmented grouped encode/decode handling through native layout once 256+256+64 is validated end-to-end.
+		return SegmentedHeadDimPlan{
+			HeadDim:      576,
+			Segments:     []int{256, 256, 64},
+			Experimental: true,
+		}, true
+	default:
+		return SegmentedHeadDimPlan{}, false
+	}
+}
+
 type NativeGroupedHeader struct {
 	LayoutVersion      int
 	LayoutKind         string

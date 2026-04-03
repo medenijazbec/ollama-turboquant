@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,5 +106,76 @@ func TestRunRecallDistanceValidationFailure(t *testing.T) {
 	got := runRecallDistanceValidation(cfg, cell)
 	if got.Status != validationFailed {
 		t.Fatalf("expected failed validation, got %+v", got)
+	}
+}
+
+func TestRunValidationLongContextRecallPasses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_ = json.NewEncoder(w).Encode(map[string]any{"response": "string=LC-NEEDLE-7781 number=48291057", "done": true})
+	}))
+	defer server.Close()
+
+	parsed, _ := url.Parse(server.URL)
+	cfg := config{Model: "m"}
+	cell := sweepCell{
+		Host:     hostTarget{BaseURL: server.URL, Label: "turbo", URL: parsed, Client: api.NewClient(parsed, server.Client()), KVSupportMode: hostKVSupportRequest},
+		KVMode:   "q8_0/tq35",
+		Workload: workloadSpec{Name: workloadLongContextRecall, NumCtx: 128000, MaxTokens: 64},
+	}
+	got := runLongContextRecallValidation(cfg, cell)
+	if got.Kind != validationLongContextRecall || got.Status != validationPassed {
+		t.Fatalf("unexpected validation result: %+v", got)
+	}
+}
+
+func TestRunPromptFileRegressionValidationUsesFileFixture(t *testing.T) {
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.txt")
+	if err := os.WriteFile(promptPath, []byte(strings.Repeat("loaded from file ", 40)), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_ = json.NewEncoder(w).Encode(map[string]any{"response": "stable summary", "done": true, "prompt": body["prompt"]})
+	}))
+	defer server.Close()
+
+	parsed, _ := url.Parse(server.URL)
+	cfg := config{Model: "m", PromptFile: promptPath}
+	cell := sweepCell{
+		Host:     hostTarget{BaseURL: server.URL, Label: "turbo", URL: parsed, Client: api.NewClient(parsed, server.Client()), KVSupportMode: hostKVSupportRequest},
+		KVMode:   "tq35",
+		Workload: workloadSpec{Name: workloadPromptFileRegress, NumCtx: 64000, MaxTokens: 64},
+	}
+	got := runPromptFileRegressionValidation(cfg, cell)
+	if got.Kind != validationPromptFileRegression || got.Status != validationPassed {
+		t.Fatalf("unexpected validation result: %+v", got)
+	}
+}
+
+func TestDetectCorruptionMarkersFlagsDegenerateOutput(t *testing.T) {
+	longPromptLikeOutput := strings.Repeat("token ", 300) + " ???? //// {\"answer\":"
+	markers := detectCorruptionMarkers(longPromptLikeOutput)
+	if len(markers) == 0 {
+		t.Fatal("expected corruption markers")
+	}
+}
+
+func TestLongJSONRetentionRemainsScaffolded(t *testing.T) {
+	got := runValidation(config{}, sweepCell{}, workerResult{Workload: string(workloadLongJSONRetention), WorkerIndex: 0})
+	if got.Kind != validationLongJSONRetention || got.Status != validationScaffolded {
+		t.Fatalf("unexpected validation result: %+v", got)
 	}
 }

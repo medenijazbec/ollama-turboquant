@@ -2,10 +2,10 @@ package main
 
 import "testing"
 
-func strptr(s string) *string          { return &s }
-func intPtr(v int) *int                { return &v }
-func floatPtr(v float64) *float64      { return &v }
-func testBoolPtr(v bool) *bool         { return &v }
+func strptr(s string) *string     { return &s }
+func intPtr(v int) *int           { return &v }
+func floatPtr(v float64) *float64 { return &v }
+func testBoolPtr(v bool) *bool    { return &v }
 
 func TestDefaultHostKVSupportModes(t *testing.T) {
 	modes := defaultHostKVSupportModes(3)
@@ -87,10 +87,10 @@ func TestImpactProfileDefaults(t *testing.T) {
 }
 
 func TestProofProfilesDefaults(t *testing.T) {
-	if got := defaultKVModes("regression"); len(got) != 1 || got[0] != "f16" {
+	if got := defaultKVModes("regression", "tq35"); len(got) != 1 || got[0] != "f16" {
 		t.Fatalf("unexpected regression kv modes: %#v", got)
 	}
-	if got := defaultKVModes("turbo-benefit"); len(got) != 3 || got[1] != "tq25" || got[2] != "tq35" {
+	if got := defaultKVModes("turbo-benefit", "tq35"); len(got) != 3 || got[1] != "tq25" || got[2] != "tq35" {
 		t.Fatalf("unexpected turbo-benefit kv modes: %#v", got)
 	}
 	if got := profileEpochs("regression"); got != 8 {
@@ -99,11 +99,20 @@ func TestProofProfilesDefaults(t *testing.T) {
 	if got := profileEpochs("capacity"); got != 2 {
 		t.Fatalf("profileEpochs(capacity) = %d, want 2", got)
 	}
-	if got := defaultKVModes("spill"); len(got) != 3 || got[2] != "tq35" {
+	if got := defaultKVModes("spill", "tq35"); len(got) != 3 || got[2] != "tq35" {
 		t.Fatalf("unexpected spill kv modes: %#v", got)
 	}
 	if got := profileEpochs("spill"); got != 2 {
 		t.Fatalf("profileEpochs(spill) = %d, want 2", got)
+	}
+	if got := defaultKVModes("large-context", "tq35"); len(got) != 4 || got[2] != "q8_0/tq35" || got[3] != "tq35" {
+		t.Fatalf("unexpected large-context kv modes: %#v", got)
+	}
+	if got := profileWorkloads("large-context"); len(got) == 0 || got[0] != workloadFitCeiling {
+		t.Fatalf("unexpected large-context workloads: %#v", got)
+	}
+	if got := profileContexts("large-context"); len(got) != len(defaultContextLadder()) || got[0] != 1000000 {
+		t.Fatalf("unexpected large-context context ladder: %#v", got)
 	}
 }
 
