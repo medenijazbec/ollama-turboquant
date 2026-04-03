@@ -48,6 +48,10 @@ func buildGenerateOptions(host hostTarget, kvMode string, numCtx int, numPredict
 	}
 }
 
+func applyFlashAttentionOption(options map[string]any, requested bool) {
+	options["flash_attention"] = requested
+}
+
 func legacyKVUnsupportedError(kvMode string) string {
 	return "unsupported kv_cache_type on target host"
 }

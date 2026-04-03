@@ -1,44 +1,51 @@
 name: ollama-main-turboquant-server
 
 services:
-  coding-ollama52-turboquant:
+  ollama52-turboquant:
     build:
       context: .
       dockerfile: Dockerfile.sm52-turboquant
       args:
         CUDA_VERSION: "11.8.0"
         UBUNTU_VERSION: "22.04"
-        OLLAMA_VERSION: "v0.17.7"
+        OLLAMA_VERSION: "v0.18.3"
         GO_VERSION: "auto"
-    image: coding-ollama52-turboquant:cuda11.8-sm52
+        CUDA_ARCHITECTURES: "52-real;75-real"
+    image: turboquant-ollama52:cuda11.8-sm52-sm75
+    container_name: turboquant-ollama52
     restart: unless-stopped
+
     gpus: all
+
     ports:
       - "11439:11434"
+
     volumes:
       - /srv/models/ollama:/models
       - ./.docker/ollama-config:/root/.ollama
+
     environment:
       OLLAMA_HOST: "0.0.0.0:11434"
       OLLAMA_MODELS: "/models"
+
       OLLAMA_LOAD_TIMEOUT: "120m"
-      OLLAMA_LLM_LIBRARY: "cuda_v11_avx"
-      OLLAMA_KV_CACHE_TYPE: "tq35"
-      OLLAMA_KV_CACHE_BACKEND: "cuda"
+
       GGML_CUDA_FORCE_MMQ: "0"
       GGML_CUDA_DISABLE_GRAPHS: "1"
-      OLLAMA_FLASH_ATTENTION: "1"
-      OLLAMA_DEBUG: "DEBUG"
+      OLLAMA_FLASH_ATTENTION: "0"
+      OLLAMA_DEBUG: "INFO"
       OLLAMA_KEEP_ALIVE: "24h"
-      OLLAMA_GPU_OVERHEAD: "4294967296"
+      OLLAMA_GPU_OVERHEAD: "1073741824"
+
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
-      CUDA_VISIBLE_DEVICES: "all"
-      NVIDIA_VISIBLE_DEVICES: "all"
+
     shm_size: "16g"
+
     ulimits:
       memlock: -1
       nofile:
         soft: 1048576
         hard: 1048576
+
     extra_hosts:
       - host.docker.internal:host-gateway

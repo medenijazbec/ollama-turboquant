@@ -55,7 +55,7 @@ kvstress-bench \
   --epochs 1 \
   --output /results/native_baseline_gpu_check_paper.csv \
   --jsonl-output /results/native_baseline_gpu_check_paper.jsonl \
-  --summary-output /results/native_baseline_gpu_check_paper.txt
+  --summary-output /results/native_baseline_gpu_check_paper.md
 ```
 
 The baseline host must show:
@@ -77,7 +77,7 @@ kvstress-bench \
   --profile turbo-benefit \
   --output /results/qwen30b_kvstress.csv \
   --jsonl-output /results/qwen30b_kvstress.jsonl \
-  --summary-output /results/qwen30b_kvstress.txt
+  --summary-output /results/qwen30b_kvstress.md
 ```
 
 ## Profiles

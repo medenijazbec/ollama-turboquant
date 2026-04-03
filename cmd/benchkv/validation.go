@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ollama/ollama/api"
 )
@@ -53,6 +54,9 @@ func runValidation(cfg config, cell sweepCell, row workerResult) validationResul
 		return runPromptFileRegressionValidation(cfg, cell)
 	case workloadDecodeCorruption:
 		return runDecodeCorruptionValidation(cfg, cell)
+	case workloadAgenticStructured:
+		// Implemented agentic and long-context validation in the benchmark harness so we do not judge TurboQuant on PPL or speed alone; idea source: @seanrasch.
+		return runAgenticStructuredValidation(cfg, cell)
 	case workloadLongJSONRetention:
 		return validationResult{Kind: validationLongJSONRetention, Status: validationScaffolded, Error: "long-json retention scaffolded; no concrete implementation yet"}
 	case workloadFitCeiling:
@@ -103,6 +107,13 @@ func runPromptFileRegressionValidation(cfg config, cell sweepCell) validationRes
 	}
 	inlineMarkers := detectCorruptionMarkers(inlineObserved)
 	fileMarkers := detectCorruptionMarkers(fileObserved)
+	for attempt := 1; attempt < cfg.Repeats; attempt++ {
+		repeatObserved, repeatErr := runValidationGenerate(cfg, cell, inlinePrompt, 96)
+		if repeatErr != nil {
+			return validationResult{Kind: validationPromptFileRegression, Status: validationFailed, Expected: "repeated prompt should complete", Observed: repeatObserved, Error: repeatErr.Error()}
+		}
+		inlineMarkers = append(inlineMarkers, detectCorruptionMarkers(repeatObserved)...)
+	}
 	if len(inlineMarkers) == 0 && len(fileMarkers) == 0 {
 		return validationResult{Kind: validationPromptFileRegression, Status: validationPassed, Expected: "no prompt-ingestion corruption markers", Observed: "inline=" + inlineObserved + " | file=" + fileObserved}
 	}
@@ -115,10 +126,60 @@ func runDecodeCorruptionValidation(cfg config, cell sweepCell) validationResult 
 		return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationFailed, Expected: "valid JSON answer with checksum 12345", Observed: observed, Error: err.Error()}
 	}
 	markers := detectCorruptionMarkers(observed)
+	for attempt := 1; attempt < cfg.Repeats; attempt++ {
+		repeatObserved, repeatErr := runValidationGenerate(cfg, cell, buildDecodeCorruptionPrompt(max(cell.Workload.PromptTokensTarget, 1024)), max(cell.Workload.MaxTokens, 2048))
+		if repeatErr != nil {
+			return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationFailed, Expected: "valid JSON answer with checksum 12345", Observed: repeatObserved, Error: repeatErr.Error()}
+		}
+		markers = append(markers, detectCorruptionMarkers(repeatObserved)...)
+	}
 	if len(markers) == 0 && strings.Contains(observed, "12345") {
 		return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationPassed, Expected: "valid JSON answer with checksum 12345", Observed: observed}
 	}
 	return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationFailed, Expected: "valid JSON answer with checksum 12345", Observed: observed, Error: strings.Join(markers, ",")}
+}
+
+func runAgenticStructuredValidation(cfg config, cell sweepCell) validationResult {
+	stream := false
+	keepAlive := api.Duration{Duration: cfg.KeepAlive}
+	options, disposition := buildGenerateOptions(cell.Host, cell.KVMode, cell.Workload.NumCtx, 256, cfg.Seed, 0)
+	if !disposition.Supported {
+		return validationResult{Kind: validationStructuredOutput, Status: validationSkipped, Error: disposition.Error}
+	}
+	applyFlashAttentionOption(options, cell.FARequested)
+
+	req := &api.ChatRequest{
+		Model:     cfg.Model,
+		Stream:    &stream,
+		KeepAlive: &keepAlive,
+		Format: []byte(`{"type":"object","properties":{"winner":{"type":"string"},"confidence":{"type":"number"},"conflict":{"type":"boolean"}},"required":["winner","confidence","conflict"]}`),
+		Messages: []api.Message{
+			{Role: "user", Content: buildAgenticStructuredPrompt(cfg.ToolSuite)},
+		},
+		Options: options,
+	}
+
+	ctx, cancel := withOptionalTimeout(context.Background(), minValidationTimeout(cfg.Timeout))
+	defer cancel()
+
+	var observed strings.Builder
+	var finalErr error
+	err := cell.Host.Client.Chat(ctx, req, func(resp api.ChatResponse) error {
+		observed.WriteString(resp.Message.Content)
+		return nil
+	})
+	if err != nil {
+		finalErr = err
+	}
+	if finalErr != nil {
+		return validationResult{Kind: validationStructuredOutput, Status: validationFailed, Expected: `{"winner":"alpha","confidence":0.82,"conflict":true}`, Observed: observed.String(), Error: finalErr.Error()}
+	}
+	markers := detectCorruptionMarkers(observed.String())
+	normalized := normalizeValidationText(observed.String())
+	if len(markers) == 0 && strings.Contains(normalized, `"winner":"alpha"`) && strings.Contains(normalized, `"conflict":true`) {
+		return validationResult{Kind: validationStructuredOutput, Status: validationPassed, Expected: `{"winner":"alpha","confidence":0.82,"conflict":true}`, Observed: observed.String()}
+	}
+	return validationResult{Kind: validationStructuredOutput, Status: validationFailed, Expected: `{"winner":"alpha","confidence":0.82,"conflict":true}`, Observed: observed.String(), Error: strings.Join(markers, ",")}
 }
 
 func runValidationGenerate(cfg config, cell sweepCell, prompt string, maxTokens int) (string, error) {
@@ -152,8 +213,17 @@ func runValidationGenerate(cfg config, cell sweepCell, prompt string, maxTokens 
 func detectCorruptionMarkers(observed string) []string {
 	lower := strings.ToLower(observed)
 	var markers []string
+	if strings.TrimSpace(observed) == "" {
+		markers = append(markers, "empty-output")
+	}
+	if !utf8.ValidString(observed) {
+		markers = append(markers, "invalid-utf8")
+	}
 	if strings.Contains(lower, "////") || strings.Contains(lower, "????") {
 		markers = append(markers, "slash-question repetition")
+	}
+	if strings.Contains(lower, "!!!!!") {
+		markers = append(markers, "bang repetition")
 	}
 	if strings.Count(lower, "{") != strings.Count(lower, "}") {
 		markers = append(markers, "malformed-json-braces")
@@ -233,6 +303,10 @@ func buildRecallDistancePrompt(needle string) string {
 	filler := strings.Repeat("filler-token ", 512)
 	return "Memorize the secret token hidden in the middle of the filler text and repeat it exactly at the end.\n" +
 		filler + "\nSECRET TOKEN: " + needle + "\n" + filler + "\nReply with the secret token only."
+}
+
+func buildAgenticStructuredPrompt(toolSuite string) string {
+	return "You are reconciling mock tool outputs. Tool weather_a says alpha with confidence 0.82. Tool weather_b says beta with confidence 0.41. The tools disagree, so conflict is true. Return strict JSON with winner, confidence, and conflict only. Tool suite: " + firstNonEmpty(toolSuite, "default")
 }
 
 func normalizeValidationText(value string) string {

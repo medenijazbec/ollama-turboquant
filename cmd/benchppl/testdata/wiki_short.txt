@@ -1,0 +1,3 @@
+TurboQuant benchmarking needs repeatable corpus slices so baseline and native runs can be compared without hiding fallback behavior.
+This short fixture is intentionally plain ASCII and deterministic. It exists to exercise the bench-only score route, chunking, delta-vs-baseline reporting, and requested-versus-effective cache metadata.
+Longer corpora can be added later, but the first checkpoint keeps the dataset local, reviewable, and fast enough to run on development hosts.

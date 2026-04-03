@@ -658,6 +658,7 @@ type Runner struct {
 	NumBatch       int    `json:"num_batch,omitempty"`
 	NumGPU         int    `json:"num_gpu,omitempty"`
 	MainGPU        int    `json:"main_gpu,omitempty"`
+	FlashAttention *bool  `json:"flash_attention,omitempty"`
 	UseMMap        *bool  `json:"use_mmap,omitempty"`
 	NumThread      int    `json:"num_thread,omitempty"`
 	KVCacheType    string `json:"kv_cache_type,omitempty"`

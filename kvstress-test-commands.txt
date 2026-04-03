@@ -36,7 +36,7 @@ docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-comp
   --timeout 0 \
   --output /results/native_baseline_gpu_check_paper.csv \
   --jsonl-output /results/native_baseline_gpu_check_paper.jsonl \
-  --summary-output /results/native_baseline_gpu_check_paper.txt
+  --summary-output /results/native_baseline_gpu_check_paper.md
 
 1. Regression gate for paper TurboQuant rollout
 Tests:
@@ -52,7 +52,7 @@ docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-comp
   --timeout 0 \
   --output /results/regression_paper.csv \
   --jsonl-output /results/regression_paper.jsonl \
-  --summary-output /results/regression_paper.txt
+  --summary-output /results/regression_paper.md
 
 2. Same-runtime paper TurboQuant proof
 Tests:
@@ -69,7 +69,7 @@ docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-comp
   --timeout 0 \
   --output /results/turbo_benefit_paper.csv \
   --jsonl-output /results/turbo_benefit_paper.jsonl \
-  --summary-output /results/turbo_benefit_paper.txt
+  --summary-output /results/turbo_benefit_paper.md
 
 3. Capacity proof for paper TurboQuant
 Tests:
@@ -86,7 +86,7 @@ docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-comp
   --timeout 0 \
   --output /results/capacity_paper.csv \
   --jsonl-output /results/capacity_paper.jsonl \
-  --summary-output /results/capacity_paper.txt
+  --summary-output /results/capacity_paper.md
 
 4. Spill-allowed survival for paper TurboQuant
 Tests:
@@ -102,7 +102,7 @@ docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-comp
   --timeout 0 \
   --output /results/spill_paper.csv \
   --jsonl-output /results/spill_paper.jsonl \
-  --summary-output /results/spill_paper.txt
+  --summary-output /results/spill_paper.md
 
 5. Fast first pass for paper TurboQuant
 Tests:
@@ -119,7 +119,7 @@ docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-comp
   --timeout 0 \
   --output /results/impact_paper.csv \
   --jsonl-output /results/impact_paper.jsonl \
-  --summary-output /results/impact_paper.txt
+  --summary-output /results/impact_paper.md
 
 6. Short manual same-runtime paper check
 Tests:
@@ -139,7 +139,7 @@ docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-comp
   --timeout 0 \
   --output /results/short_same_runtime_paper.csv \
   --jsonl-output /results/short_same_runtime_paper.jsonl \
-  --summary-output /results/short_same_runtime_paper.txt
+  --summary-output /results/short_same_runtime_paper.md
 
 7. Product-outcome check for paper TurboQuant
 Tests:
@@ -160,7 +160,7 @@ docker compose -f /srv/share/ollama-benchmark/ollama-main-turboquant/docker-comp
   --timeout 0 \
   --output /results/product_outcome_paper.csv \
   --jsonl-output /results/product_outcome_paper.jsonl \
-  --summary-output /results/product_outcome_paper.txt
+  --summary-output /results/product_outcome_paper.md
 
 Suggested run order:
 0. native_baseline_gpu_check

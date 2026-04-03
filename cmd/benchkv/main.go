@@ -44,14 +44,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ERROR writing CSV: %v\n", writeErr)
 		os.Exit(1)
 	}
-	if writeErr := writeSummary(cfg.SummaryPath, aggregates, staircases); writeErr != nil {
+	if writeErr := writeSummary(cfg.MarkdownPath, aggregates, staircases); writeErr != nil {
 		fmt.Fprintf(os.Stderr, "ERROR writing summary: %v\n", writeErr)
 		os.Exit(1)
 	}
 
 	fmt.Printf("Wrote CSV summary to %s\n", cfg.OutputPath)
 	fmt.Printf("Wrote JSONL rows to %s\n", cfg.JSONLPath)
-	fmt.Printf("Wrote text summary to %s\n", cfg.SummaryPath)
+	fmt.Printf("Wrote markdown summary to %s\n", cfg.MarkdownPath)
 
 	if err != nil {
 		os.Exit(1)

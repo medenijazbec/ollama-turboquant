@@ -103,7 +103,7 @@ func TestRunProbeRequestRequestHostIncludesKVOptions(t *testing.T) {
 		KVSupportMode: hostKVSupportRequest,
 	}
 
-	if _, err := runProbeRequest(context.Background(), host, "m", "tq35", 4096, 128, 5*time.Second); err != nil {
+	if _, err := runProbeRequest(context.Background(), host, "m", "tq35", 4096, 128, 5*time.Second, false); err != nil {
 		t.Fatalf("runProbeRequest failed: %v", err)
 	}
 

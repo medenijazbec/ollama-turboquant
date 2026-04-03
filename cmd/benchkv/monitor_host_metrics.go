@@ -88,6 +88,12 @@ func (m *hostMetricsMonitor) stats() hostMemoryStats {
 	stats := hostMemoryStats{
 		Available:        true,
 		Source:           firstNonEmpty(m.source, "unavailable"),
+		HostRAMBeforeBytes: func() *int64 {
+			if m.baselineRAM > 0 {
+				return int64Ptr(m.baselineRAM)
+			}
+			return nil
+		}(),
 		HostRAMUsedBytes: int64Ptr(m.currentRAM),
 		PeakHostRAMBytes: int64Ptr(m.peakRAM),
 		SampleCount:      m.samples,

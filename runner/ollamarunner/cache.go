@@ -571,6 +571,15 @@ func summarizeKVMode(kType, vType string) string {
 	return fmt.Sprintf("k=%s,v=%s", kType, vType)
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func formatNativeSupportFallbackReason(support turboQuantModelSupport, referenceWrapperAvailable bool) string {
 	target := "reference wrapper"
 	if !referenceWrapperAvailable {

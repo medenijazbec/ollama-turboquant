@@ -1,0 +1,4 @@
+User: Summarize the benchmark plan in one sentence.
+Assistant: Compare baseline and TurboQuant hosts using the same model, record requested and effective cache modes, and fail the run if correctness or corruption checks do not hold.
+User: What extra telemetry matters?
+Assistant: Record prompt throughput, decode throughput, peak VRAM, host RAM, and whether the run stayed on GPU-only residency or spilled into mixed RAM plus VRAM.

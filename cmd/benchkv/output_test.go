@@ -48,7 +48,7 @@ func TestWriteCSV(t *testing.T) {
 	if !strings.Contains(string(data), "visible_gpu_count,per_gpu_vram_gib,total_visible_vram_bytes,process_vram_bytes") {
 		t.Fatal("expected per-gpu telemetry columns in csv header")
 	}
-	if !strings.Contains(string(data), "peak_host_ram_delta_bytes,used_host_assist,used_mmap,used_cpu_assist") {
+	if !strings.Contains(string(data), "peak_host_ram_delta_bytes,host_ram_before_bytes,host_ram_after_load_bytes,host_ram_after_prefill_bytes,host_ram_after_decode_bytes,used_host_assist,used_mmap,used_cpu_assist") {
 		t.Fatal("expected host-assist columns in csv header")
 	}
 	if !strings.Contains(string(data), "kv_algo_resolved") {

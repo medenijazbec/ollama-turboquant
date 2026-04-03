@@ -19,4 +19,4 @@ kvstress-bench \
   --profile "$PROFILE" \
   --output "$OUTDIR/${OUTBASE}.csv" \
   --jsonl-output "$OUTDIR/${OUTBASE}.jsonl" \
-  --summary-output "$OUTDIR/${OUTBASE}.txt"
+  --summary-output "$OUTDIR/${OUTBASE}.md"

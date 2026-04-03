@@ -21,6 +21,7 @@ const (
 	workloadLongJSONRetention workloadName = "long-json-retention"
 	workloadPromptFileRegress workloadName = "prompt-file-regression"
 	workloadDecodeCorruption  workloadName = "decode-corruption-guard"
+	workloadAgenticStructured workloadName = "agentic-structured"
 )
 
 type hostTarget struct {
@@ -36,6 +37,10 @@ type config struct {
 	Model            string
 	KVModes          []string
 	TurboMode        string
+	FAModes          []bool
+	Repeats          int
+	RecallDistances  []int
+	ToolSuite        string
 	Profile          string
 	Workloads        []workloadName
 	NumCtx           []int
@@ -57,7 +62,12 @@ type config struct {
 	OutputPath       string
 	JSONLPath        string
 	SummaryPath      string
+	MarkdownPath     string
 	OutputDir        string
+	BaselineHost     string
+	TurboHost        string
+	ModelFamilyOverride string
+	ModelSizeLabel      string
 	ContextLadder    []int
 	StretchContext   int
 	MinFitDecode     int
@@ -79,9 +89,10 @@ type workloadSpec struct {
 }
 
 type sweepCell struct {
-	Host     hostTarget
-	KVMode   string
-	Workload workloadSpec
+	Host        hostTarget
+	KVMode      string
+	Workload    workloadSpec
+	FARequested bool
 }
 
 type hostPreflight struct {
@@ -130,6 +141,9 @@ type workerResult struct {
 	HostLabel                 string       `json:"host_label"`
 	ServerVersion             string       `json:"server_version"`
 	Model                     string       `json:"model"`
+	ModelFamily               string       `json:"model_family,omitempty"`
+	ModelArch                 string       `json:"model_arch,omitempty"`
+	ModelSizeLabel            string       `json:"model_size_label,omitempty"`
 	Quant                     string       `json:"quant"`
 	KVModeRequested           string       `json:"kv_mode_requested"`
 	KVModeResolved            string       `json:"kv_mode_resolved,omitempty"`
@@ -137,6 +151,10 @@ type workerResult struct {
 	KVModeRequestedV          string       `json:"kv_mode_requested_v,omitempty"`
 	KVModeResolvedK           string       `json:"kv_mode_resolved_k,omitempty"`
 	KVModeResolvedV           string       `json:"kv_mode_resolved_v,omitempty"`
+	RequestedCacheTypeK       string       `json:"requested_cache_type_k,omitempty"`
+	RequestedCacheTypeV       string       `json:"requested_cache_type_v,omitempty"`
+	EffectiveCacheTypeK       string       `json:"effective_cache_type_k,omitempty"`
+	EffectiveCacheTypeV       string       `json:"effective_cache_type_v,omitempty"`
 	RequestedMode             string       `json:"requested_mode,omitempty"`
 	EffectiveMode             string       `json:"effective_mode,omitempty"`
 	KVAlgoResolved            string       `json:"kv_algo_resolved,omitempty"`
@@ -148,12 +166,17 @@ type workerResult struct {
 	KVPathV                   string       `json:"kv_path_v,omitempty"`
 	KVSymmetric               bool         `json:"kv_symmetric"`
 	KVAsymmetric              bool         `json:"kv_asymmetric"`
+	SymmetricRequested        bool         `json:"symmetric_requested"`
+	SymmetricEffective        bool         `json:"symmetric_effective"`
 	FallbackApplied           bool         `json:"fallback_applied"`
 	KOnlyFallback             bool         `json:"k_only_fallback"`
 	FallbackReason            string       `json:"fallback_reason,omitempty"`
 	TurboQuantPathKind        string       `json:"turboquant_path_kind,omitempty"`
+	PathKind                  string       `json:"path_kind,omitempty"`
 	NativeTurboQuantActive    bool         `json:"native_turboquant_active"`
 	ReferenceTurboQuantActive bool         `json:"reference_turboquant_active"`
+	FlashAttentionRequested   bool         `json:"flash_attention_requested"`
+	FlashAttentionEffective   bool         `json:"flash_attention_effective"`
 	FAEnabled                 bool         `json:"fa_enabled"`
 	FARequiredForVTurbo       bool         `json:"fa_required_for_v_turbo"`
 	VTurboSupported           bool         `json:"v_turbo_supported"`
@@ -172,6 +195,8 @@ type workerResult struct {
 	RequestedNumCtx           int          `json:"requested_num_ctx,omitempty"`
 	AttemptedNumCtx           int          `json:"attempted_num_ctx,omitempty"`
 	EffectiveNumCtx           int          `json:"effective_num_ctx,omitempty"`
+	ContextRequested          int          `json:"context_requested,omitempty"`
+	ContextEffective          int          `json:"context_effective,omitempty"`
 	RequestedContextTopRung   int          `json:"requested_context_top_rung,omitempty"`
 	ContextLadderIndex        int          `json:"context_ladder_index,omitempty"`
 	ContextFallbackReason     string       `json:"context_fallback_reason,omitempty"`
@@ -181,11 +206,18 @@ type workerResult struct {
 	LadderRejectedRungs       string       `json:"ladder_rejected_rungs,omitempty"`
 	ModelFileSizeBytes        *int64       `json:"model_file_size_bytes,omitempty"`
 	EstimatedKVFootprintBytes *int64       `json:"estimated_kv_footprint_bytes,omitempty"`
+	KVBufferBytesEstimate     *int64       `json:"kv_buffer_bytes_estimate,omitempty"`
 	VisibleGPUCount           int          `json:"visible_gpu_count,omitempty"`
 	PerGPUVRAMGiB             string       `json:"per_gpu_vram_gib,omitempty"`
 	TotalVisibleVRAMBytes     *int64       `json:"total_visible_vram_bytes,omitempty"`
 	ProcessVRAMBytes          *int64       `json:"process_vram_bytes,omitempty"`
+	GPUVRAMUsedBytes          *int64       `json:"gpu_vram_used_bytes,omitempty"`
+	GPUVRAMFreeBytes          *int64       `json:"gpu_vram_free_bytes,omitempty"`
 	PeakHostRAMDeltaBytes     *int64       `json:"peak_host_ram_delta_bytes,omitempty"`
+	HostRAMBeforeBytes        *int64       `json:"host_ram_before_bytes,omitempty"`
+	HostRAMAfterLoadBytes     *int64       `json:"host_ram_after_load_bytes,omitempty"`
+	HostRAMAfterPrefillBytes  *int64       `json:"host_ram_after_prefill_bytes,omitempty"`
+	HostRAMAfterDecodeBytes   *int64       `json:"host_ram_after_decode_bytes,omitempty"`
 	UsedHostAssist            bool         `json:"used_host_assist"`
 	UsedMMap                  bool         `json:"used_mmap"`
 	UsedCPUAssist             bool         `json:"used_cpu_assist"`
@@ -193,10 +225,21 @@ type workerResult struct {
 	NativeContextAdvertised   int          `json:"native_context_advertised,omitempty"`
 	YarnContextAdvertised     int          `json:"yarn_context_advertised,omitempty"`
 	ValidationCorruptionMarks string       `json:"validation_corruption_markers,omitempty"`
+	FitStatus                 string       `json:"fit_status,omitempty"`
+	CorruptionStatus          string       `json:"corruption_status,omitempty"`
+	CorrectnessStatus         string       `json:"correctness_status,omitempty"`
+	ResidencyKind             string       `json:"residency_kind,omitempty"`
+	Notes                     string       `json:"notes,omitempty"`
+	PromptTPSDeltaVsBaseline  *float64     `json:"prompt_tps_delta_vs_baseline,omitempty"`
+	DecodeTPSDeltaVsBaseline  *float64     `json:"decode_tps_delta_vs_baseline,omitempty"`
+	HostRAMDeltaVsBaseline    *int64       `json:"host_ram_delta_vs_baseline_bytes,omitempty"`
+	GPUVRAMDeltaVsBaseline    *int64       `json:"gpu_vram_delta_vs_baseline_bytes,omitempty"`
+	ContextDeltaVsBaseline    *int64       `json:"context_delta_vs_baseline,omitempty"`
 	Workload                  string       `json:"workload"`
 	NumCtx                    int          `json:"num_ctx"`
 	PromptTokensTarget        int          `json:"prompt_tokens_target"`
 	PromptEvalCount           int          `json:"prompt_eval_count"`
+	PromptTokens              int          `json:"prompt_tokens,omitempty"`
 	MaxTokens                 int          `json:"max_tokens"`
 	EvalCount                 int          `json:"eval_count"`
 	GeneratedTokens           int          `json:"generated_tokens"`
@@ -214,6 +257,7 @@ type workerResult struct {
 	LoadMS                    float64      `json:"load_ms"`
 	TotalMS                   float64      `json:"total_ms"`
 	WallMS                    float64      `json:"wall_ms"`
+	WallTimeS                 float64      `json:"wall_time_s,omitempty"`
 	PeakVRAMBytes             *int64       `json:"peak_vram_bytes"`
 	AvgGPUUtil                *float64     `json:"avg_gpu_util"`
 	PeakGPUUtil               *float64     `json:"peak_gpu_util"`
@@ -242,6 +286,9 @@ type epochAggregate struct {
 	HostLabel                 string
 	ServerVersion             string
 	Model                     string
+	ModelFamily               string
+	ModelArch                 string
+	ModelSizeLabel            string
 	Quant                     string
 	KVModeRequested           string
 	KVModeResolved            string
@@ -249,6 +296,10 @@ type epochAggregate struct {
 	KVModeRequestedV          string
 	KVModeResolvedK           string
 	KVModeResolvedV           string
+	RequestedCacheTypeK       string
+	RequestedCacheTypeV       string
+	EffectiveCacheTypeK       string
+	EffectiveCacheTypeV       string
 	RequestedMode             string
 	EffectiveMode             string
 	KVAlgoResolved            string
@@ -260,12 +311,17 @@ type epochAggregate struct {
 	KVPathV                   string
 	KVSymmetric               bool
 	KVAsymmetric              bool
+	SymmetricRequested        bool
+	SymmetricEffective        bool
 	FallbackApplied           bool
 	KOnlyFallback             bool
 	FallbackReason            string
 	TurboQuantPathKind        string
+	PathKind                  string
 	NativeTurboQuantActive    bool
 	ReferenceTurboQuantActive bool
+	FlashAttentionRequested   bool
+	FlashAttentionEffective   bool
 	FAEnabled                 bool
 	FARequiredForVTurbo       bool
 	VTurboSupported           bool
@@ -284,6 +340,8 @@ type epochAggregate struct {
 	RequestedNumCtx           int
 	AttemptedNumCtx           int
 	EffectiveNumCtx           int
+	ContextRequested          int
+	ContextEffective          int
 	RequestedContextTopRung   int
 	ContextLadderIndex        int
 	ContextFallbackReason     string
@@ -293,11 +351,18 @@ type epochAggregate struct {
 	LadderRejectedRungs       string
 	ModelFileSizeBytes        *int64
 	EstimatedKVFootprintBytes *int64
+	KVBufferBytesEstimate     *int64
 	VisibleGPUCount           int
 	PerGPUVRAMGiB             string
 	TotalVisibleVRAMBytes     *int64
 	ProcessVRAMBytes          *int64
+	GPUVRAMUsedBytes          *int64
+	GPUVRAMFreeBytes          *int64
 	PeakHostRAMDeltaBytes     *int64
+	HostRAMBeforeBytes        *int64
+	HostRAMAfterLoadBytes     *int64
+	HostRAMAfterPrefillBytes  *int64
+	HostRAMAfterDecodeBytes   *int64
 	UsedHostAssist            bool
 	UsedMMap                  bool
 	UsedCPUAssist             bool
@@ -305,10 +370,21 @@ type epochAggregate struct {
 	NativeContextAdvertised   int
 	YarnContextAdvertised     int
 	ValidationCorruptionMarks string
+	FitStatus                 string
+	CorruptionStatus          string
+	CorrectnessStatus         string
+	ResidencyKind             string
+	Notes                     string
+	PromptTPSDeltaVsBaseline  *float64
+	DecodeTPSDeltaVsBaseline  *float64
+	HostRAMDeltaVsBaseline    *int64
+	GPUVRAMDeltaVsBaseline    *int64
+	ContextDeltaVsBaseline    *int64
 	Workload                  string
 	NumCtx                    int
 	PromptTokensTarget        int
 	PromptEvalCount           int
+	PromptTokens              int
 	MaxTokens                 int
 	EvalCount                 int
 	GeneratedTokens           int
@@ -324,6 +400,7 @@ type epochAggregate struct {
 	LoadMS                    float64
 	TotalMS                   float64
 	WallMS                    float64
+	WallTimeS                 float64
 	PeakVRAMBytes             *int64
 	AvgGPUUtil                *float64
 	PeakGPUUtil               *float64
@@ -364,6 +441,7 @@ type gpuStats struct {
 	Available             bool
 	Source                string
 	PeakVRAMBytes         *int64
+	CurrentVRAMBytes      *int64
 	AvgGPUUtil            *float64
 	PeakGPUUtil           *float64
 	ProcessVRAMBytes      *int64
@@ -377,6 +455,7 @@ type gpuStats struct {
 type hostMemoryStats struct {
 	Available             bool
 	Source                string
+	HostRAMBeforeBytes    *int64
 	HostRAMUsedBytes      *int64
 	PeakHostRAMBytes      *int64
 	PeakHostRAMDeltaBytes *int64

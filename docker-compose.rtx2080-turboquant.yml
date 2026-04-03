@@ -14,10 +14,12 @@ services:
     gpus: all
     ports:
       - "11440:11434"
+    working_dir: /work
     volumes:
+      - .:/work
       - /srv/models/ollama:/models
-      - ../results:/results
-      - ../results_full:/results_full
+      - ./results:/results
+      - ./results_full:/results_full
       - ./.docker/ollama-config-2080:/root/.ollama
     environment:
       OLLAMA_HOST: "0.0.0.0:11434"

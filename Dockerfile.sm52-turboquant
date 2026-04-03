@@ -1,10 +1,15 @@
+# syntax=docker/dockerfile:1.6
 ARG CUDA_VERSION=11.8.0
 ARG UBUNTU_VERSION=22.04
 
+# Build for both Maxwell sm_52 (Tesla M40) and Turing sm_75 (RTX 2080)
+ARG CUDA_ARCHITECTURES="52-real;75-real"
+
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
 
-ARG OLLAMA_VERSION=v0.17.7
+ARG OLLAMA_VERSION=v0.18.3
 ARG GO_VERSION=auto
+ARG CUDA_ARCHITECTURES
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -37,9 +42,10 @@ RUN set -eux; \
 ENV PATH=/usr/local/go/bin:$PATH
 
 RUN set -eux; \
+    echo "Building CUDA architectures: ${CUDA_ARCHITECTURES}"; \
     cmake -S . -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CUDA_ARCHITECTURES=52; \
+      -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}"; \
     cmake --build build -j"$(nproc)"; \
     test -d build/lib/ollama
 

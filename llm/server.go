@@ -217,11 +217,15 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 	}
 	// Determine if the user has forced FA on or off
 	faUserSet := false
-	if envconfig.FlashAttention(true) == envconfig.FlashAttention(false) {
+	if opts.FlashAttention != nil {
+		faUserSet = true
+	} else if envconfig.FlashAttention(true) == envconfig.FlashAttention(false) {
 		faUserSet = true
 	}
-
 	fa := envconfig.FlashAttention(f.FlashAttention())
+	if opts.FlashAttention != nil {
+		fa = *opts.FlashAttention
+	}
 
 	// This will disable flash attention unless all GPUs on the system support it, even if we end up selecting a subset
 	// that can handle it.

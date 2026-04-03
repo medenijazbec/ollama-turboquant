@@ -37,6 +37,11 @@ func preflightHost(ctx context.Context, cfg config, host hostTarget) (hostPrefli
 		out.OllamaPSBefore = captureOllamaPS()
 	}
 
+	faRequested := false
+	if len(cfg.FAModes) > 0 {
+		faRequested = cfg.FAModes[len(cfg.FAModes)-1]
+	}
+
 	for _, kvMode := range cfg.KVModes {
 		result := kvSupportResult{Supported: true, Status: statusOK}
 		if host.KVSupportMode == hostKVSupportLegacy {
@@ -49,7 +54,7 @@ func preflightHost(ctx context.Context, cfg config, host hostTarget) (hostPrefli
 			}
 		}
 
-		metrics, err := runProbeRequest(ctx, host, cfg.Model, kvMode, 4096, 128, cfg.Timeout)
+		metrics, err := runProbeRequest(ctx, host, cfg.Model, kvMode, 4096, 128, cfg.Timeout, faRequested)
 		if err != nil {
 			if isUnsupportedKVError(err) {
 				result.Supported = false
@@ -100,7 +105,7 @@ func fetchVersion(ctx context.Context, host hostTarget) (string, error) {
 	return body.Version, nil
 }
 
-func runProbeRequest(ctx context.Context, host hostTarget, model, kvMode string, numCtx, promptTokens int, timeout time.Duration) (*api.Metrics, error) {
+func runProbeRequest(ctx context.Context, host hostTarget, model, kvMode string, numCtx, promptTokens int, timeout time.Duration, faRequested bool) (*api.Metrics, error) {
 	stream := true
 	keepAlive := api.Duration{Duration: -1}
 	prompt := renderPrompt(max(1, int(float64(promptTokens)/1.3)), 0)
@@ -108,6 +113,7 @@ func runProbeRequest(ctx context.Context, host hostTarget, model, kvMode string,
 	if !disposition.Supported {
 		return nil, errors.New(disposition.Error)
 	}
+	applyFlashAttentionOption(options, faRequested)
 
 	req := &api.GenerateRequest{
 		Model:     model,

@@ -162,6 +162,7 @@ func (m *gpuMonitor) stats() gpuStats {
 		Available:       true,
 		Source:          firstNonEmpty(m.source, "unavailable"),
 		PeakVRAMBytes:   int64Ptr(m.peakVRAM),
+		CurrentVRAMBytes: int64Ptr(m.peakVRAM),
 		AvgGPUUtil:      float64Ptr(m.sumMeanUtil / float64(m.samples)),
 		PeakGPUUtil:     float64Ptr(m.peakMeanUtil),
 		VisibleGPUCount: m.visibleGPUCount,

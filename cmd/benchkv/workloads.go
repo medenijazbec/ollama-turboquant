@@ -2,6 +2,13 @@ package main
 
 import "cmp"
 
+func effectiveFAModes(cfg config) []bool {
+	if len(cfg.FAModes) == 0 {
+		return []bool{false}
+	}
+	return cfg.FAModes
+}
+
 func buildStandardCells(cfg config) []sweepCell {
 	switch cfg.Profile {
 	case "impact":
@@ -19,16 +26,19 @@ func buildStandardCells(cfg config) []sweepCell {
 	var cells []sweepCell
 	for _, host := range cfg.Hosts {
 		for _, kvMode := range cfg.KVModes {
-			for _, workload := range cfg.Workloads {
-				if workload == workloadNearOOMStaircase {
-					continue
-				}
-				for _, spec := range expandWorkload(cfg, workload) {
-					cells = append(cells, sweepCell{
-						Host:     host,
-						KVMode:   kvMode,
-						Workload: spec,
-					})
+			for _, faRequested := range effectiveFAModes(cfg) {
+				for _, workload := range cfg.Workloads {
+					if workload == workloadNearOOMStaircase {
+						continue
+					}
+					for _, spec := range expandWorkload(cfg, workload) {
+						cells = append(cells, sweepCell{
+							Host:        host,
+							KVMode:      kvMode,
+							Workload:    spec,
+							FARequested: faRequested,
+						})
+					}
 				}
 			}
 		}
@@ -40,16 +50,19 @@ func buildRegressionCells(cfg config) []sweepCell {
 	var cells []sweepCell
 	for _, host := range cfg.Hosts {
 		for _, kvMode := range cfg.KVModes {
-			for _, workload := range cfg.Workloads {
-				if workload == workloadNearOOMStaircase {
-					continue
-				}
-				for _, spec := range expandWorkload(cfg, workload) {
-					cells = append(cells, sweepCell{
-						Host:     host,
-						KVMode:   kvMode,
-						Workload: spec,
-					})
+			for _, faRequested := range effectiveFAModes(cfg) {
+				for _, workload := range cfg.Workloads {
+					if workload == workloadNearOOMStaircase {
+						continue
+					}
+					for _, spec := range expandWorkload(cfg, workload) {
+						cells = append(cells, sweepCell{
+							Host:        host,
+							KVMode:      kvMode,
+							Workload:    spec,
+							FARequested: faRequested,
+						})
+					}
 				}
 			}
 		}
@@ -64,16 +77,19 @@ func buildTurboBenefitCells(cfg config) []sweepCell {
 			continue
 		}
 		for _, kvMode := range cfg.KVModes {
-			for _, workload := range cfg.Workloads {
-				if workload == workloadNearOOMStaircase {
-					continue
-				}
-				for _, spec := range expandWorkload(cfg, workload) {
-					cells = append(cells, sweepCell{
-						Host:     host,
-						KVMode:   kvMode,
-						Workload: spec,
-					})
+			for _, faRequested := range effectiveFAModes(cfg) {
+				for _, workload := range cfg.Workloads {
+					if workload == workloadNearOOMStaircase {
+						continue
+					}
+					for _, spec := range expandWorkload(cfg, workload) {
+						cells = append(cells, sweepCell{
+							Host:        host,
+							KVMode:      kvMode,
+							Workload:    spec,
+							FARequested: faRequested,
+						})
+					}
 				}
 			}
 		}
@@ -102,12 +118,15 @@ func buildImpactCells(cfg config) []sweepCell {
 	var cells []sweepCell
 	for _, host := range cfg.Hosts {
 		for _, kvMode := range cfg.KVModes {
-			for _, spec := range specs {
-				cells = append(cells, sweepCell{
-					Host:     host,
-					KVMode:   kvMode,
-					Workload: spec,
-				})
+			for _, faRequested := range effectiveFAModes(cfg) {
+				for _, spec := range specs {
+					cells = append(cells, sweepCell{
+						Host:        host,
+						KVMode:      kvMode,
+						Workload:    spec,
+						FARequested: faRequested,
+					})
+				}
 			}
 		}
 	}
@@ -118,16 +137,19 @@ func buildLargeContextCells(cfg config) []sweepCell {
 	var cells []sweepCell
 	for _, host := range cfg.Hosts {
 		for _, kvMode := range cfg.KVModes {
-			for _, workload := range cfg.Workloads {
-				spec, ok := makeWorkloadSpec(cfg, workload, cfg.StretchContext, 1)
-				if !ok {
-					continue
+			for _, faRequested := range effectiveFAModes(cfg) {
+				for _, workload := range cfg.Workloads {
+					spec, ok := makeWorkloadSpec(cfg, workload, cfg.StretchContext, 1)
+					if !ok {
+						continue
+					}
+					cells = append(cells, sweepCell{
+						Host:        host,
+						KVMode:      kvMode,
+						Workload:    spec,
+						FARequested: faRequested,
+					})
 				}
-				cells = append(cells, sweepCell{
-					Host:     host,
-					KVMode:   kvMode,
-					Workload: spec,
-				})
 			}
 		}
 	}
@@ -193,6 +215,10 @@ func makeWorkloadSpec(cfg config, workload workloadName, numCtx, concurrency int
 	case workloadDecodeCorruption:
 		promptTokens := cmp.Or(cfg.PromptTokens, max(512, min(numCtx/2, promptTokensAt90Percent(numCtx))))
 		maxTokens := cmp.Or(cfg.MaxTokens, 2048)
+		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
+	case workloadAgenticStructured:
+		promptTokens := cmp.Or(cfg.PromptTokens, max(1024, min(numCtx/2, promptTokensAt90Percent(numCtx))))
+		maxTokens := cmp.Or(cfg.MaxTokens, 256)
 		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
 	default:
 		return workloadSpec{}, false

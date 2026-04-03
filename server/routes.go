@@ -141,6 +141,25 @@ func (s *Server) modelOptions(model *Model, requestOpts map[string]any) (api.Opt
 	return opts, nil
 }
 
+func benchScoreGrammarLiteral(text string) string {
+	replacer := strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+		"\r", "\\r",
+		"\n", "\\n",
+	)
+	return "\"" + replacer.Replace(text) + "\""
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // scheduleRunner schedules a runner after validating inputs such as capabilities and model options.
 // It returns the allocated runner, model instance, and consolidated options if successful and error otherwise.
 func (s *Server) scheduleRunner(ctx context.Context, name string, caps []model.Capability, requestOpts map[string]any, keepAlive *api.Duration) (llm.LlamaServer, *Model, *api.Options, error) {
@@ -189,6 +208,184 @@ func signinURL() (string, error) {
 	encKey := base64.RawURLEncoding.EncodeToString([]byte(pubKey))
 	h, _ := os.Hostname()
 	return fmt.Sprintf(signinURLStr, url.PathEscape(h), encKey), nil
+}
+
+func (s *Server) BenchScoreHandler(c *gin.Context) {
+	var req api.BenchScoreRequest
+	if err := c.ShouldBindJSON(&req); errors.Is(err, io.EOF) {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
+		return
+	} else if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if strings.TrimSpace(req.Model) == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "model is required"})
+		return
+	}
+	if req.Target == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "target is required"})
+		return
+	}
+
+	modelRef, err := parseAndValidateModelRef(req.Model)
+	if err != nil {
+		writeModelRefParseError(c, err, http.StatusNotFound, fmt.Sprintf("model '%s' not found", req.Model))
+		return
+	}
+	if modelRef.Source == modelSourceCloud {
+		c.AbortWithStatusJSON(http.StatusNotImplemented, gin.H{"error": "bench score route is only available for local hosts"})
+		return
+	}
+
+	name, err := getExistingName(modelRef.Name)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("model '%s' not found", req.Model)})
+		return
+	}
+
+	requestOpts := map[string]any{}
+	for k, v := range req.Options {
+		requestOpts[k] = v
+	}
+	if _, ok := requestOpts["temperature"]; !ok {
+		requestOpts["temperature"] = 0
+	}
+	if _, ok := requestOpts["top_p"]; !ok {
+		requestOpts["top_p"] = 1
+	}
+	if _, ok := requestOpts["repeat_penalty"]; !ok {
+		requestOpts["repeat_penalty"] = 1
+	}
+
+	runner, _, opts, err := s.scheduleRunner(c.Request.Context(), name.String(), []model.Capability{model.CapabilityCompletion}, requestOpts, req.KeepAlive)
+	if err != nil {
+		handleScheduleError(c, req.Model, err)
+		return
+	}
+
+	targetTokens, err := runner.Tokenize(c.Request.Context(), req.Target)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if len(targetTokens) == 0 {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "target must produce at least one token"})
+		return
+	}
+	if _, ok := req.Options["num_predict"]; !ok {
+		opts.NumPredict = len(targetTokens)
+	}
+
+	var observed strings.Builder
+	var observedLogprobs []llm.Logprob
+	var final llm.CompletionResponse
+	start := time.Now()
+	err = runner.Completion(c.Request.Context(), llm.CompletionRequest{
+		Prompt:      req.Prompt,
+		Options:     opts,
+		Grammar:     "root ::= " + benchScoreGrammarLiteral(req.Target),
+		Logprobs:    true,
+		TopLogprobs: 0,
+		Shift:       true,
+		Truncate:    true,
+	}, func(cr llm.CompletionResponse) {
+		final = cr
+		observed.WriteString(cr.Content)
+		if len(cr.Logprobs) > 0 {
+			observedLogprobs = append(observedLogprobs, cr.Logprobs...)
+		}
+	})
+	if err != nil {
+		var serr api.StatusError
+		if errors.As(err, &serr) {
+			c.JSON(serr.StatusCode, gin.H{"error": serr.ErrorMessage})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	nll := 0.0
+	for _, lp := range observedLogprobs {
+		nll -= lp.Logprob
+	}
+
+	resp := api.BenchScoreResponse{
+		Model:                 req.Model,
+		Prompt:                req.Prompt,
+		Target:                req.Target,
+		Observed:              observed.String(),
+		TokenCount:            len(observedLogprobs),
+		NegativeLogLikelihood: nll,
+		Perplexity:            math.Exp(nll / float64(max(1, len(observedLogprobs)))),
+		Metrics: api.Metrics{
+			TotalDuration:             time.Since(start),
+			PromptEvalCount:           final.PromptEvalCount,
+			PromptEvalDuration:        final.PromptEvalDuration,
+			EvalCount:                 final.EvalCount,
+			EvalDuration:              final.EvalDuration,
+			KVCacheRequested:          final.KVCacheRequested,
+			KVCacheEffective:          final.KVCacheEffective,
+			KVCacheRequestedK:         final.KVCacheRequestedK,
+			KVCacheRequestedV:         final.KVCacheRequestedV,
+			RequestedMode:             final.RequestedMode,
+			ResolvedKVCacheType:       final.ResolvedKVCacheType,
+			ResolvedKVCacheTypeK:      final.ResolvedKVCacheTypeK,
+			ResolvedKVCacheTypeV:      final.ResolvedKVCacheTypeV,
+			EffectiveMode:             final.EffectiveMode,
+			KVAlgoResolved:            final.KVAlgoResolved,
+			KVAlgoResolvedK:           final.KVAlgoResolvedK,
+			KVAlgoResolvedV:           final.KVAlgoResolvedV,
+			KVCacheBackend:            final.KVCacheBackend,
+			KVCachePath:               final.KVCachePath,
+			KVCachePathK:              final.KVCachePathK,
+			KVCachePathV:              final.KVCachePathV,
+			KVSymmetric:               final.KVSymmetric,
+			KVAsymmetric:              final.KVAsymmetric,
+			FallbackReason:            final.FallbackReason,
+			FallbackApplied:           final.FallbackApplied,
+			KOnlyFallback:             final.KOnlyFallback,
+			TurboQuantPathKind:        final.TurboQuantPathKind,
+			NativeTurboQuantActive:    final.NativeTurboQuantActive,
+			ReferenceTurboQuantActive: final.ReferenceTurboQuantActive,
+			FAEnabled:                 final.FAEnabled,
+			FARequiredForVTurbo:       final.FARequiredForVTurbo,
+			VTurboSupported:           final.VTurboSupported,
+			DetectedHeadDim:           final.DetectedHeadDim,
+			ArchitectureClass:         final.ArchitectureClass,
+			SupportTier:               final.SupportTier,
+			SupportReason:             final.SupportReason,
+			UnsupportedReason:         final.UnsupportedReason,
+			HybridKVArchitecture:      final.HybridKVArchitecture,
+			NativeTurboQuantAllowed:   final.NativeTurboQuantAllowed,
+			PresetRequested:           final.PresetRequested,
+			PresetResolved:            final.PresetResolved,
+			PresetWarning:             final.PresetWarning,
+			PairingValidated:          final.PairingValidated,
+			ExperimentalLane:          final.ExperimentalLane,
+			TQBlockSize:               final.TQBlockSize,
+			TQLayoutKind:              final.TQLayoutKind,
+			TQLayoutVersion:           final.TQLayoutVersion,
+			TQGroupCount:              final.TQGroupCount,
+			TQOriginalHeadDim:         final.TQOriginalHeadDim,
+			TQTailPad:                 final.TQTailPad,
+			KVCacheBytes:              final.KVCacheBytes,
+			WeightsBytes:              final.WeightsBytes,
+			TotalVRAMBytes:            final.TotalVRAMBytes,
+		},
+	}
+	if observed.String() != req.Target {
+		resp.FallbackReason = firstNonEmptyString(resp.FallbackReason, "bench score observed output differed from requested target")
+	}
+	if len(observedLogprobs) == 0 {
+		resp.FallbackReason = firstNonEmptyString(resp.FallbackReason, "bench score did not return token logprobs")
+		resp.Perplexity = 0
+		resp.TokenCount = 0
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 func (s *Server) GenerateHandler(c *gin.Context) {
@@ -1758,6 +1955,7 @@ func (s *Server) GenerateRoutes(rc *ollama.Registry) (http.Handler, error) {
 	r.GET("/api/ps", s.PsHandler)
 	r.POST("/api/generate", s.withInferenceRequestLogging("/api/generate", s.GenerateHandler)...)
 	r.POST("/api/chat", s.withInferenceRequestLogging("/api/chat", s.ChatHandler)...)
+	r.POST("/api/bench/score", s.BenchScoreHandler)
 	r.POST("/api/embed", s.EmbedHandler)
 	r.POST("/api/embeddings", s.EmbeddingsHandler)
 
