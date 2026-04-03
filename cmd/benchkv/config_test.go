@@ -127,3 +127,13 @@ func TestTimeoutDurationZeroDisablesTimeout(t *testing.T) {
 		t.Fatalf("timeoutDuration(60) = %v, want 60s", got)
 	}
 }
+
+func TestParseIntCSVAllowEmptyAllowsZero(t *testing.T) {
+	got, err := parseIntCSVAllowEmpty("0,200,500")
+	if err != nil {
+		t.Fatalf("parseIntCSVAllowEmpty failed: %v", err)
+	}
+	if len(got) != 3 || got[0] != 0 || got[1] != 200 || got[2] != 500 {
+		t.Fatalf("unexpected parsed values: %#v", got)
+	}
+}

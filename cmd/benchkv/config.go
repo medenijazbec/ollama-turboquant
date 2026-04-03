@@ -503,7 +503,23 @@ func parseIntCSVAllowEmpty(value string) ([]int, error) {
 	if strings.TrimSpace(value) == "" {
 		return nil, nil
 	}
-	return parseIntCSV(value)
+	parts, err := parseCSV(value)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int, 0, len(parts))
+	for _, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, err
+		}
+		if n < 0 {
+			return nil, fmt.Errorf("value %d must be >= 0", n)
+		}
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return slices.Compact(out), nil
 }
 
 func parseFAModes(value, profile string) ([]bool, error) {
