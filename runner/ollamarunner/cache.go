@@ -176,9 +176,19 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 			kvAlgoResolvedV = turboquant.AlgorithmPaper
 			vTurboSupported = true
 		}
-		if preset, ok := kvcachePreset(dtype); ok {
+		// Determine the effective dtype for wrapper activation. When no unified
+		// kv_cache_type was given but the K-side requests TurboQuant, use dtypeK
+		// so that --cache-type-k tq35 actually activates the wrapper instead of
+		// silently falling back to f16.
+		effectiveDType := dtype
+		if _, ok := kvcachePreset(effectiveDType); !ok {
+			if _, ok := kvcachePreset(dtypeK); ok {
+				effectiveDType = dtypeK
+			}
+		}
+		if preset, ok := kvcachePreset(effectiveDType); ok {
 			cache = kvcache.WrapWithTurboQuant(cache, preset, normalizedKVCacheBackend)
-			kvCachePath = resolveKVCachePath(model.Backend(), dtype, normalizedKVCacheBackend)
+			kvCachePath = resolveKVCachePath(model.Backend(), effectiveDType, normalizedKVCacheBackend)
 			kvAlgoResolved = turboquant.AlgorithmPaper
 			turboQuantPathKind = "reference_wrapper"
 			referenceTurboQuantActive = true
@@ -188,7 +198,7 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 					"requested", normalizedKVCacheType, "backend", normalizedKVCacheBackend, "path", kvCachePath)
 			}
 		}
-		cache.Init(model.Backend(), dtype, numSlots, int(numCtx), batchSize)
+		cache.Init(model.Backend(), effectiveDType, numSlots, int(numCtx), batchSize)
 		if info, ok := kvcache.LookupTurboQuantLayoutInfo(cache); ok {
 			if info.PathKind != "" {
 				turboQuantPathKind = info.PathKind

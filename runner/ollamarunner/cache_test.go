@@ -1070,3 +1070,48 @@ func TestNewInputCacheExposesPresetMetadata(t *testing.T) {
 		t.Fatalf("unexpected preset warning: %+v", info)
 	}
 }
+
+// TestNewInputCacheKSideOnlyActivatesWrapper asserts that supplying only
+// --cache-type-k tq35 (no unified kv_cache_type) wraps the cache with
+// TurboQuant and applies it to both K and V sides via the reference wrapper.
+// Regression test for the bug where per-side K/V overrides were recorded in
+// metrics but never forwarded to cache.Init or WrapWithTurboQuant.
+func TestNewInputCacheKSideOnlyActivatesWrapper(t *testing.T) {
+	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	// kvCacheType (unified) is empty; only K side specifies tq35.
+	inputCache, err := NewInputCache(model, "", "tq35", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The cache must be wrapped — previously it fell through to a plain Causal.
+	tqCache, ok := inputCache.cache.(*kvcache.TurboQuantCache)
+	if !ok {
+		t.Fatalf("cache type = %T, want *kvcache.TurboQuantCache (K-side tq35 did not activate wrapper)", inputCache.cache)
+	}
+
+	_ = tqCache // type assertion sufficient; fields checked via RuntimeInfo below
+	info := inputCache.RuntimeInfo()
+
+	// Reference wrapper must be active.
+	if !info.ReferenceTurboQuantActive {
+		t.Fatalf("ReferenceTurboQuantActive = false, want true")
+	}
+
+	// K side must report the paper algorithm.
+	if info.AlgorithmK != turboquant.AlgorithmPaper {
+		t.Fatalf("AlgorithmK = %q, want %q", info.AlgorithmK, turboquant.AlgorithmPaper)
+	}
+
+	// The unified algorithm must also be set — the wrapper was applied.
+	if info.Algorithm != turboquant.AlgorithmPaper {
+		t.Fatalf("Algorithm = %q, want %q", info.Algorithm, turboquant.AlgorithmPaper)
+	}
+
+	// AlgorithmV stays empty when only K was explicitly requested and
+	// resolveTurboQuantFallback demoted V to f16 (FA off, no native path).
+	// The TurboQuantCache wrapper still compresses V as a side effect, but
+	// that is not separately tracked in AlgorithmV.
+}
