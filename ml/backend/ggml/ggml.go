@@ -3,11 +3,15 @@ package ggml
 // #cgo linux LDFLAGS: -lrt -lpthread -ldl -lstdc++ -lm
 // #cgo windows LDFLAGS: -lpthread
 // #cgo CPPFLAGS: -I${SRCDIR}/ggml/include
+// #cgo CFLAGS: -O2
 // #include <stdlib.h>
 // #include <stdint.h>
 // #include "ggml.h"
 // #include "ggml-cpu.h"
 // #include "ggml-backend.h"
+// void turboquant_score_cells(const float *query, const float *dequant,
+//     const float *corr, const float *resid_norms, float query_norm,
+//     int dim, int n_cells, float *scores);
 import "C"
 
 import (
@@ -1056,9 +1060,10 @@ func (c *Context) Close() {
 }
 
 type Tensor struct {
-	b    *Backend
-	t    *C.struct_ggml_tensor
-	sync func()
+	b           *Backend
+	t           *C.struct_ggml_tensor
+	sync        func()
+	initialized bool // true if data was loaded via tensorSet (input tensors)
 }
 
 func (t *Tensor) LogValue() slog.Value {
@@ -1087,13 +1092,14 @@ func (t *Tensor) Shape() []int {
 }
 
 func (t *Tensor) Bytes() (data []byte) {
-	if t.sync != nil {
-		data = make([]byte, C.ggml_nbytes(t.t))
-
-		t.sync()
-		C.ggml_backend_tensor_get(t.t, unsafe.Pointer(&data[0]), 0, C.ggml_nbytes(t.t))
+	if t.sync == nil && !t.initialized {
+		return
 	}
-
+	data = make([]byte, C.ggml_nbytes(t.t))
+	if t.sync != nil {
+		t.sync()
+	}
+	C.ggml_backend_tensor_get(t.t, unsafe.Pointer(&data[0]), 0, C.ggml_nbytes(t.t))
 	return
 }
 
@@ -1116,6 +1122,7 @@ func tensorSet[S ~[]E, E byte | float32 | int32](t *Tensor, s S) {
 		panic("data size does not match tensor size")
 	}
 	C.ggml_backend_tensor_set(t.t, unsafe.Pointer(&s[0]), 0, C.ggml_nbytes(t.t))
+	t.initialized = true
 }
 
 func (t *Tensor) FromBytes(s []byte) {
@@ -1843,39 +1850,124 @@ func turboQuantAttentionScores(ctx ml.Context, query, key ml.Tensor) ml.Tensor {
 		panic(fmt.Sprintf("turboquant key byte size mismatch: got %d want %d", len(keyBytes), rowBytes*cachedSize))
 	}
 
-	firstPreset, err := presetForEncodedRow(keyBytes[:rowBytes])
-	if err != nil {
-		panic(err)
+	// Pre-parse all key rows once. This resolves the rotation matrix and codebook
+	// once per cached key rather than once per (query × key) pair, eliminating
+	// O(cachedSize) redundant O(d^2) matrix-vector multiplies per generated token.
+	preparedBlocks := make([]turboquant.PreparedBlock, cachedSize)
+	var firstPreset turboquant.Preset
+	for cell := 0; cell < cachedSize; cell++ {
+		row := keyBytes[cell*rowBytes : (cell+1)*rowBytes]
+		pb, preset, err := turboquant.PrepareEncodedVector(row)
+		if err != nil {
+			panic(fmt.Sprintf("turboquant: PrepareEncodedVector cell %d: %v", cell, err))
+		}
+		preparedBlocks[cell] = pb
+		if cell == 0 {
+			firstPreset = preset
+		}
 	}
 
-	kvHeads := queryKVHeads(headDim, firstPreset, keyBytes[:rowBytes])
+	// All cells in a layer share the same rotation (same preset seed and encoded dim).
+	encodedDim := preparedBlocks[0].EncodedDim()
+	if encodedDim%headDim != 0 {
+		panic(fmt.Sprintf("turboquant row dim %d is not divisible by head dim %d for preset %s", encodedDim, headDim, firstPreset.Name))
+	}
+	kvHeads := encodedDim / headDim
 	if kvHeads <= 0 || numHeads%kvHeads != 0 {
 		panic(fmt.Sprintf("invalid turboquant kv head mapping: query heads %d kv heads %d", numHeads, kvHeads))
 	}
 	groupSize := numHeads / kvHeads
+	rotation := turboquant.RotationForBlock(preparedBlocks[0])
 
-	kqData := make([]float32, cachedSize*seqLenQ*numHeads)
-	for head := 0; head < numHeads; head++ {
-		kvHead := head / groupSize
-		for q := 0; q < seqLenQ; q++ {
-			queryVector := make([]float32, headDim)
-			for d := 0; d < headDim; d++ {
-				queryVector[d] = queryFloats[d+headDim*q+headDim*seqLenQ*head]
+	// Pack PreparedBlock data into flat C-accessible arrays once (before the
+	// parallel head loop) so each (head, query) goroutine can call the C kernel
+	// with a single CGO call covering all cells. CGO call overhead (~100 ns) is
+	// negligible compared to the SIMD speedup from processing many cells at once.
+	dequantFlat := make([]float32, cachedSize*encodedDim)
+	var corrFlat []float32
+	var residNorms []float32
+	for _, pb := range preparedBlocks {
+		if pb.CorrectionVec() != nil {
+			corrFlat = make([]float32, cachedSize*encodedDim)
+			residNorms = make([]float32, cachedSize)
+			break
+		}
+	}
+	for cell, pb := range preparedBlocks {
+		copy(dequantFlat[cell*encodedDim:], pb.Dequant())
+		if corrFlat != nil {
+			corr := pb.CorrectionVec()
+			if corr != nil {
+				copy(corrFlat[cell*encodedDim:], corr)
 			}
-			expandedQuery := queryVectorForKVHead(queryVector, kvHead, kvHeads)
-
-			for cell := 0; cell < cachedSize; cell++ {
-				row := keyBytes[cell*rowBytes : (cell+1)*rowBytes]
-				score, _, err := turboquant.ScoreEncodedVector(expandedQuery, row)
-				if err != nil {
-					panic(err)
-				}
-				kqData[cell+cachedSize*q+cachedSize*seqLenQ*head] = score
-			}
+			residNorms[cell] = pb.ResidualNorm()
 		}
 	}
 
+	kqData := make([]float32, cachedSize*seqLenQ*numHeads)
+
+	// Each head writes to a disjoint region of kqData so goroutines are
+	// data-race-free without any locking.
+	var wg sync.WaitGroup
+	for head := 0; head < numHeads; head++ {
+		wg.Add(1)
+		go func(head int) {
+			defer wg.Done()
+			kvHead := head / groupSize
+			for q := 0; q < seqLenQ; q++ {
+				// Rotate the query once per (head, q) and reuse for all cached keys.
+				queryVector := make([]float32, headDim)
+				for d := 0; d < headDim; d++ {
+					queryVector[d] = queryFloats[d+headDim*q+headDim*seqLenQ*head]
+				}
+				expandedQuery := queryVectorForKVHead(queryVector, kvHead, kvHeads)
+				queryRotated := turboquant.ApplyRotation(expandedQuery, rotation)
+				queryNorm := turboquant.QueryNorm(queryRotated)
+
+				base := cachedSize*q + cachedSize*seqLenQ*head
+				scoreTurboQuantCells(queryRotated, queryNorm, dequantFlat, corrFlat, residNorms, encodedDim, cachedSize, kqData[base:])
+			}
+		}(head)
+	}
+	wg.Wait()
+
 	return ctx.Input().FromFloats(kqData, cachedSize, seqLenQ, numHeads)
+}
+
+// scoreTurboQuantCells calls the C kernel (turboquant_kernel.c) to score all
+// cached keys against a single pre-rotated query in one CGO call.
+//
+// Parameters mirror turboquant_score_cells in turboquant_kernel.c:
+//   queryRotated  – pre-rotated query vector [encodedDim]
+//   queryNorm     – L2 norm of queryRotated (for Cauchy-Schwarz clamping)
+//   dequantFlat   – [nCells × encodedDim] primary dequantized values, row-major
+//   corrFlat      – [nCells × encodedDim] precomputed QJL correction vectors; nil if MSE-only
+//   residNorms    – [nCells] per-cell residual norms for clamping; nil if corrFlat is nil
+//   encodedDim    – vector dimension
+//   nCells        – number of cached tokens
+//   scores        – output [nCells]; must be pre-allocated by the caller
+func scoreTurboQuantCells(
+	queryRotated []float32, queryNorm float32,
+	dequantFlat, corrFlat []float32, residNorms []float32,
+	encodedDim, nCells int,
+	scores []float32,
+) {
+	var corrPtr *C.float
+	var residPtr *C.float
+	if len(corrFlat) > 0 {
+		corrPtr = (*C.float)(unsafe.Pointer(&corrFlat[0]))
+		residPtr = (*C.float)(unsafe.Pointer(&residNorms[0]))
+	}
+	C.turboquant_score_cells(
+		(*C.float)(unsafe.Pointer(&queryRotated[0])),
+		(*C.float)(unsafe.Pointer(&dequantFlat[0])),
+		corrPtr,
+		residPtr,
+		C.float(queryNorm),
+		C.int(encodedDim),
+		C.int(nCells),
+		(*C.float)(unsafe.Pointer(&scores[0])),
+	)
 }
 
 func tensorAsF32(ctx ml.Context, t ml.Tensor) []float32 {
@@ -1886,22 +1978,6 @@ func tensorAsF32(ctx ml.Context, t ml.Tensor) []float32 {
 	}
 	ctx.Forward(f32).Compute(f32)
 	return append([]float32(nil), f32.Floats()...)
-}
-
-func presetForEncodedRow(row []byte) (turboquant.Preset, error) {
-	_, preset, err := turboquant.DecodeVector(row)
-	return preset, err
-}
-
-func queryKVHeads(headDim int, preset turboquant.Preset, row []byte) int {
-	values, _, err := turboquant.DecodeVector(row)
-	if err != nil {
-		panic(err)
-	}
-	if len(values)%headDim != 0 {
-		panic(fmt.Sprintf("turboquant row dim %d is not divisible by head dim %d for preset %s", len(values), headDim, preset.Name))
-	}
-	return len(values) / headDim
 }
 
 func queryVectorForKVHead(queryVector []float32, kvHead, kvHeads int) []float32 {

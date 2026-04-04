@@ -48,6 +48,7 @@ type config struct {
 	MarkdownPath   string
 	OutputDir      string
 	ModelSizeLabel string
+	GatePPLDelta   float64
 }
 
 type rawFlags struct {
@@ -67,6 +68,7 @@ type rawFlags struct {
 	summaryOutput  *string
 	outputDir      *string
 	modelSizeLabel *string
+	gatePPLDelta   *float64
 }
 
 type chunkResult struct {
@@ -185,6 +187,11 @@ func main() {
 	fmt.Printf("Wrote CSV summary to %s\n", cfg.OutputPath)
 	fmt.Printf("Wrote JSONL rows to %s\n", cfg.JSONLPath)
 	fmt.Printf("Wrote markdown summary to %s\n", cfg.MarkdownPath)
+
+	if err := checkPPLGate(cfg, aggregates); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: PPL gate failed: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func parseFlags() rawFlags {
@@ -205,6 +212,7 @@ func parseFlags() rawFlags {
 		summaryOutput:  flag.String("summary-output", "", "Markdown output path alias"),
 		outputDir:      flag.String("output-dir", "/results", "Output directory"),
 		modelSizeLabel: flag.String("model-size-label", "", "Optional model size label override"),
+		gatePPLDelta:   flag.Float64("gate-ppl-delta", 0, "Exit non-zero if any TQ mode PPL delta vs f16 baseline exceeds this threshold (0 = disabled)"),
 	}
 }
 
@@ -246,6 +254,7 @@ func loadConfig(r rawFlags) (config, error) {
 		Seed:           *r.seed,
 		OutputDir:      strings.TrimSpace(*r.outputDir),
 		ModelSizeLabel: strings.TrimSpace(*r.modelSizeLabel),
+		GatePPLDelta:   *r.gatePPLDelta,
 	}
 
 	for i, host := range hosts {
@@ -525,6 +534,37 @@ func applyBaselinePPLDeltas(rows []aggregateResult) {
 		delta := rows[i].Perplexity - base.Perplexity
 		rows[i].PPLDeltaVsBaseline = &delta
 	}
+}
+
+// checkPPLGate returns an error if any TQ-mode row's PPL delta vs the f16 baseline
+// exceeds cfg.GatePPLDelta. A delta of 0 disables the gate. This enforces the
+// paper's quality-neutral claim: tq35 should add no more than ~0.5 PPL points
+// vs full-precision on standard corpora.
+func checkPPLGate(cfg config, rows []aggregateResult) error {
+	if cfg.GatePPLDelta <= 0 {
+		return nil
+	}
+	var failures []string
+	for _, row := range rows {
+		isTQ := strings.HasPrefix(row.RequestedCacheTypeK, "tq") || strings.HasPrefix(row.RequestedCacheTypeV, "tq")
+		if !isTQ || row.PPLDeltaVsBaseline == nil {
+			continue
+		}
+		if *row.PPLDeltaVsBaseline > cfg.GatePPLDelta {
+			failures = append(failures, fmt.Sprintf(
+				"host=%s model=%s kv=%s/%s fa=%t: delta=%.4f > threshold=%.4f",
+				row.HostLabel, row.Model,
+				row.RequestedCacheTypeK, row.RequestedCacheTypeV,
+				row.FlashAttentionRequested,
+				*row.PPLDeltaVsBaseline, cfg.GatePPLDelta,
+			))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("PPL delta exceeds --gate-ppl-delta=%.4f for %d row(s):\n  %s",
+			cfg.GatePPLDelta, len(failures), strings.Join(failures, "\n  "))
+	}
+	return nil
 }
 
 func writeJSONL(path string, rows []chunkResult) error {
