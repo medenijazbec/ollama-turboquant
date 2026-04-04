@@ -89,18 +89,91 @@ func TestPackBitsRoundTripMixedWidths(t *testing.T) {
 	}
 }
 
-func TestEncodeUsesSinglePaperBlock(t *testing.T) {
+// TestEncodeOutlierSplitLayout verifies that vectors larger than OutlierCount
+// are encoded as two blocks (outlier + regular) with the expected bit widths and
+// ChannelIndices, and that vectors at or below OutlierCount stay as a single block.
+func TestEncodeOutlierSplitLayout(t *testing.T) {
+	// dim=70 > OutlierCount=32: two blocks expected.
 	encoded, err := EncodeVector(pseudoRandomVector(70, 0x55), PresetTQ35)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded.Blocks) != 1 {
-		t.Fatalf("block count = %d, want 1", len(encoded.Blocks))
+	if len(encoded.Blocks) != 2 {
+		t.Fatalf("block count = %d, want 2", len(encoded.Blocks))
 	}
-	if encoded.Blocks[0].OriginalDim != 70 {
-		t.Fatalf("original dim = %d, want 70", encoded.Blocks[0].OriginalDim)
+
+	outlierBlock := encoded.Blocks[0]
+	regularBlock := encoded.Blocks[1]
+
+	if int(outlierBlock.OriginalDim) != PresetTQ35.OutlierCount {
+		t.Errorf("outlier block dim = %d, want %d", outlierBlock.OriginalDim, PresetTQ35.OutlierCount)
 	}
-	if encoded.Blocks[0].RegularBits != uint8(PresetTQ35.ValueBits) {
-		t.Fatalf("regular bits = %d, want %d", encoded.Blocks[0].RegularBits, PresetTQ35.ValueBits)
+	if outlierBlock.RegularBits != uint8(PresetTQ35.OutlierBits) {
+		t.Errorf("outlier bits = %d, want %d", outlierBlock.RegularBits, PresetTQ35.OutlierBits)
+	}
+	if len(outlierBlock.ChannelIndices) != PresetTQ35.OutlierCount {
+		t.Errorf("outlier ChannelIndices len = %d, want %d", len(outlierBlock.ChannelIndices), PresetTQ35.OutlierCount)
+	}
+
+	wantRegularDim := 70 - PresetTQ35.OutlierCount
+	if int(regularBlock.OriginalDim) != wantRegularDim {
+		t.Errorf("regular block dim = %d, want %d", regularBlock.OriginalDim, wantRegularDim)
+	}
+	if regularBlock.RegularBits != uint8(PresetTQ35.ValueBits) {
+		t.Errorf("regular bits = %d, want %d", regularBlock.RegularBits, PresetTQ35.ValueBits)
+	}
+	if len(regularBlock.ChannelIndices) != wantRegularDim {
+		t.Errorf("regular ChannelIndices len = %d, want %d", len(regularBlock.ChannelIndices), wantRegularDim)
+	}
+
+	// ChannelIndices across both blocks must cover all 70 channels exactly once.
+	seen := make([]int, 70)
+	for _, idx := range outlierBlock.ChannelIndices {
+		seen[idx]++
+	}
+	for _, idx := range regularBlock.ChannelIndices {
+		seen[idx]++
+	}
+	for i, count := range seen {
+		if count != 1 {
+			t.Errorf("channel %d appears %d times across blocks", i, count)
+		}
+	}
+}
+
+// TestBlockMarshalWithChannelIndices verifies that ChannelIndices round-trips correctly.
+func TestBlockMarshalWithChannelIndices(t *testing.T) {
+	block := Block{
+		Version:        BlockVersion,
+		PresetID:       PresetTQ25.ID,
+		Role:           uint8(roleKey),
+		Objective:      uint8(objectiveMSE),
+		OriginalDim:    4,
+		PaddedDim:      4,
+		BlockDim:       4,
+		RegularBits:    2,
+		RotationSeed:   42,
+		CodebookID:     2,
+		QJLRows:        0,
+		AuxLayoutID:    1,
+		ChannelIndices: []uint16{0, 3, 7, 12},
+		Scale:          0.5,
+		RegularIndices: []byte{0b10110001},
+	}
+	data, err := block.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Block
+	if err := got.UnmarshalBinary(data); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ChannelIndices) != len(block.ChannelIndices) {
+		t.Fatalf("ChannelIndices len: got %d want %d", len(got.ChannelIndices), len(block.ChannelIndices))
+	}
+	for i := range block.ChannelIndices {
+		if got.ChannelIndices[i] != block.ChannelIndices[i] {
+			t.Errorf("ChannelIndices[%d]: got %d want %d", i, got.ChannelIndices[i], block.ChannelIndices[i])
+		}
 	}
 }

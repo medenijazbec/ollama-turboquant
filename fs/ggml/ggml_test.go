@@ -308,10 +308,11 @@ func TestKVCacheBytesPerElementTurboQuant(t *testing.T) {
 }
 
 // TestTurboQuantGraphSizeExactLayout verifies that the GraphSize KV estimation
-// uses the actual reference-layout byte count, not the paper's ideal rate.
-// At dim=128 (the primary validated head_dim), the reference layout overhead
-// (64 B/vector fixed header) dominates the data payload.
+// uses the actual two-block reference-layout byte count, not the paper's ideal rate.
+// Phase 8 splits each vector into an outlier block (32 ch) and a regular block (dim-32 ch),
+// with ChannelIndices (2 B/channel) dominating the overhead at typical head dims.
 func TestTurboQuantGraphSizeExactLayout(t *testing.T) {
+	const tqOutlierCount = uint64(32)
 	cases := []struct {
 		cacheType  string
 		embK       uint64 // head dim for keys
@@ -319,22 +320,26 @@ func TestTurboQuantGraphSizeExactLayout(t *testing.T) {
 		wantKeyB   uint64 // expected bytes for one key vector
 		wantValueB uint64 // expected bytes for one value vector
 	}{
-		// tq35, dim=128: key = 64 + 48 + 16 = 128 B; value = 64 + 48 = 112 B
-		{"tq35", 128, 128, 128, 112},
-		// tq25, dim=128: key = 64 + 32 + 16 = 112 B; value = 64 + 32 = 96 B
-		{"tq25", 128, 128, 112, 96},
-		// tq35, dim=64: key = 64 + 24 + 8 = 96 B; value = 64 + 24 = 88 B
-		{"tq35", 64, 64, 96, 88},
+		// tq35, dim=128: overhead=122+256=378; key data=16+36+4=56; value data=16+36=52
+		{"tq35", 128, 128, 434, 430},
+		// tq25, dim=128: overhead=122+256=378; key data=12+24+4=40; value data=12+24=36
+		{"tq25", 128, 128, 418, 414},
+		// tq35, dim=64: overhead=122+128=250; key data=16+12+4=32; value data=16+12=28
+		{"tq35", 64, 64, 282, 278},
 	}
 	for _, tc := range cases {
-		keyBits := uint64(2)
-		valueBits := uint64(2)
+		var outlierBits, regularKeyBits, regularValueBits uint64
 		if normalizeKVCacheType(tc.cacheType) == "tq35" {
-			keyBits = 3
-			valueBits = 3
+			outlierBits, regularKeyBits, regularValueBits = 4, 3, 3
+		} else {
+			outlierBits, regularKeyBits, regularValueBits = 3, 2, 2
 		}
-		gotKey := uint64(64) + (tc.embK*keyBits+7)/8 + (tc.embK+7)/8
-		gotValue := uint64(64) + (tc.embV*valueBits+7)/8
+		outlierData := (tqOutlierCount*outlierBits + 7) / 8
+		qjlData := (tqOutlierCount + 7) / 8
+		gotKey := uint64(122) + 2*tc.embK +
+			outlierData + ((tc.embK-tqOutlierCount)*regularKeyBits+7)/8 + qjlData
+		gotValue := uint64(122) + 2*tc.embV +
+			outlierData + ((tc.embV-tqOutlierCount)*regularValueBits+7)/8
 		if gotKey != tc.wantKeyB {
 			t.Errorf("%s embK=%d: key bytes = %d, want %d", tc.cacheType, tc.embK, gotKey, tc.wantKeyB)
 		}

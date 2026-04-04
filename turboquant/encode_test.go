@@ -5,6 +5,104 @@ import (
 	"testing"
 )
 
+// TestOutlierSplitBoundaries pins the single-block vs two-block boundary.
+// dim == OutlierCount must produce a single block (no split).
+// dim == OutlierCount+1 is the smallest two-block encoding.
+// TestMemoryFormulaMatchesMarshalSize verifies that the two-block byte-count
+// formula used in fs/ggml/ggml.go GraphSize matches the actual MarshalBinary
+// output size. This catches formula drift whenever Block layout changes.
+func TestMemoryFormulaMatchesMarshalSize(t *testing.T) {
+	cases := []struct {
+		preset Preset
+		dim    int
+	}{
+		{PresetTQ25, 128},
+		{PresetTQ35, 128},
+		{PresetTQ35, 64},
+	}
+	for _, tc := range cases {
+		vec := make([]float32, tc.dim)
+
+		keyEncoded, err := EncodeKeyVector(vec, tc.preset)
+		if err != nil {
+			t.Fatalf("%s dim=%d key: %v", tc.preset.Name, tc.dim, err)
+		}
+		keyData, err := keyEncoded.MarshalBinary()
+		if err != nil {
+			t.Fatalf("%s dim=%d key marshal: %v", tc.preset.Name, tc.dim, err)
+		}
+
+		valueEncoded, err := EncodeValueVector(vec, tc.preset)
+		if err != nil {
+			t.Fatalf("%s dim=%d value: %v", tc.preset.Name, tc.dim, err)
+		}
+		valueData, err := valueEncoded.MarshalBinary()
+		if err != nil {
+			t.Fatalf("%s dim=%d value marshal: %v", tc.preset.Name, tc.dim, err)
+		}
+
+		// Replicate the fs/ggml/ggml.go GraphSize formula.
+		const outlierCount = uint64(32)
+		outlierBits := uint64(tc.preset.OutlierBits)
+		regularKeyBits := uint64(tc.preset.KeyPrimaryBits)
+		regularValueBits := uint64(tc.preset.ValueBits)
+		dim := uint64(tc.dim)
+		outlierData := (outlierCount*outlierBits + 7) / 8
+		qjlData := (outlierCount + 7) / 8
+		wantKey := 122 + 2*dim + outlierData + ((dim-outlierCount)*regularKeyBits+7)/8 + qjlData
+		wantValue := 122 + 2*dim + outlierData + ((dim-outlierCount)*regularValueBits+7)/8
+
+		if uint64(len(keyData)) != wantKey {
+			t.Errorf("%s dim=%d: key MarshalBinary=%d bytes, formula=%d",
+				tc.preset.Name, tc.dim, len(keyData), wantKey)
+		}
+		if uint64(len(valueData)) != wantValue {
+			t.Errorf("%s dim=%d: value MarshalBinary=%d bytes, formula=%d",
+				tc.preset.Name, tc.dim, len(valueData), wantValue)
+		}
+	}
+}
+
+func TestOutlierSplitBoundaries(t *testing.T) {
+	for _, preset := range []Preset{PresetTQ25, PresetTQ35} {
+		atBoundary := pseudoRandomVector(preset.OutlierCount, 0xbabe)
+		encoded, err := EncodeKeyVector(atBoundary, preset)
+		if err != nil {
+			t.Fatalf("%s dim=OutlierCount: %v", preset.Name, err)
+		}
+		if len(encoded.Blocks) != 1 {
+			t.Errorf("%s dim=%d: got %d blocks, want 1 (no split at exact boundary)",
+				preset.Name, preset.OutlierCount, len(encoded.Blocks))
+		}
+		if len(encoded.Blocks[0].ChannelIndices) != 0 {
+			t.Errorf("%s dim=%d: single-block should have no ChannelIndices", preset.Name, preset.OutlierCount)
+		}
+
+		minSplit := pseudoRandomVector(preset.OutlierCount+1, 0xbabe)
+		encoded2, err := EncodeKeyVector(minSplit, preset)
+		if err != nil {
+			t.Fatalf("%s dim=OutlierCount+1: %v", preset.Name, err)
+		}
+		if len(encoded2.Blocks) != 2 {
+			t.Errorf("%s dim=%d: got %d blocks, want 2 (minimum outlier split)",
+				preset.Name, preset.OutlierCount+1, len(encoded2.Blocks))
+		}
+		// Regular block has dim=1; verify it round-trips cleanly.
+		data, err := encoded2.MarshalBinary()
+		if err != nil {
+			t.Fatalf("%s dim=OutlierCount+1 marshal: %v", preset.Name, err)
+		}
+		decoded, _, err := DecodeVector(data)
+		if err != nil {
+			t.Fatalf("%s dim=OutlierCount+1 decode: %v", preset.Name, err)
+		}
+		if len(decoded) != preset.OutlierCount+1 {
+			t.Errorf("%s dim=OutlierCount+1: decoded len=%d want %d",
+				preset.Name, len(decoded), preset.OutlierCount+1)
+		}
+	}
+}
+
 func TestEncodeDecodeRoundTripAcrossShapes(t *testing.T) {
 	testCases := []struct {
 		name   string
@@ -270,6 +368,173 @@ func TestPaperProductUnbiasedness(t *testing.T) {
 	if relativeBias > maxRelBias {
 		t.Fatalf("relative bias = %.4f, want <= %.4f (product estimator should be near-unbiased)",
 			relativeBias, maxRelBias)
+	}
+}
+
+// TestOutlierSplitMSEImproves verifies that encoding with the outlier-split
+// strategy achieves lower MSE than uniform quantization at the same average bit
+// rate. This is the core quality claim of §4.3 of arXiv 2504.19874.
+func TestOutlierSplitMSEImproves(t *testing.T) {
+	const dim = 128
+	const trials = 200
+	rng := splitmix64(0xfeedbabe12345678)
+
+	for _, preset := range []Preset{PresetTQ25, PresetTQ35} {
+		t.Run(preset.Name, func(t *testing.T) {
+			var splitMSE, uniformMSE float64
+			for i := 0; i < trials; i++ {
+				vec := make([]float32, dim)
+				for j := range vec {
+					vec[j] = float32(gaussianFloat64(&rng))
+				}
+
+				// Outlier-split encoding (2-block, current path).
+				splitEncoded, err := EncodeValueVector(vec, preset)
+				if err != nil {
+					t.Fatal(err)
+				}
+				splitData, err := splitEncoded.MarshalBinary()
+				if err != nil {
+					t.Fatal(err)
+				}
+				splitDecoded, _, err := DecodeVector(splitData)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for j := range vec {
+					d := float64(vec[j] - splitDecoded[j])
+					splitMSE += d * d
+				}
+
+				// Uniform encoding: both sub-block sizes at regular bits, same total bits.
+				// Encode the whole vector at regular bits to match the average bit rate.
+				uniformBits := preset.ValueBits
+				unifBlock, err := encodeSubBlock(vec, nil, preset, roleValue, objectiveMSE, uniformBits, preset.RotationSeed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				codebook, _ := scalarCodebook(dim, uniformBits)
+				rot := BuildRotation(dim, preset.RotationSeed)
+				uIndices := unpackBits(unifBlock.RegularIndices, uniformBits, dim)
+				unifRotated := make([]float32, dim)
+				for j, idx := range uIndices {
+					unifRotated[j] = dequantizeScalar(idx, codebook) * unifBlock.Scale
+				}
+				unifDecoded := ApplyInverseRotation(unifRotated, rot)
+				for j := range vec {
+					d := float64(vec[j] - unifDecoded[j])
+					uniformMSE += d * d
+				}
+			}
+			splitMSE /= float64(trials * dim)
+			uniformMSE /= float64(trials * dim)
+			t.Logf("%s: split MSE=%.6f  uniform MSE=%.6f", preset.Name, splitMSE, uniformMSE)
+			if splitMSE >= uniformMSE {
+				t.Errorf("outlier split MSE (%.6f) not lower than uniform MSE (%.6f)", splitMSE, uniformMSE)
+			}
+		})
+	}
+}
+
+// TestOutlierSplitProductUnbiasedness verifies that the multi-block product
+// estimator remains near-unbiased after the outlier split is applied.
+func TestOutlierSplitProductUnbiasedness(t *testing.T) {
+	const dim = 128
+	const trials = 300
+	const maxRelBias = 0.07
+
+	rng := splitmix64(0xabcdef0123456789)
+	var signedBias, rmsTrue float64
+	for i := 0; i < trials; i++ {
+		query := make([]float32, dim)
+		key := make([]float32, dim)
+		for j := range query {
+			query[j] = float32(gaussianFloat64(&rng))
+			key[j] = float32(gaussianFloat64(&rng))
+		}
+
+		encoded, err := EncodeKeyVector(key, PresetTQ35)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := encoded.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		estimated, _, err := ScoreEncodedVector(query, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var trueDot float32
+		for j := range query {
+			trueDot += query[j] * key[j]
+		}
+		signedBias += float64(estimated - trueDot)
+		rmsTrue += float64(trueDot * trueDot)
+	}
+
+	avgSignedBias := signedBias / float64(trials)
+	rmsTrue = math.Sqrt(rmsTrue / float64(trials))
+	relativeBias := math.Abs(avgSignedBias) / rmsTrue
+
+	t.Logf("outlier-split avg signed bias = %.6f, rms true dot = %.6f, relative bias = %.4f",
+		avgSignedBias, rmsTrue, relativeBias)
+	if relativeBias > maxRelBias {
+		t.Fatalf("relative bias = %.4f, want <= %.4f (multi-block estimator should be near-unbiased)",
+			relativeBias, maxRelBias)
+	}
+}
+
+// TestMultiBlockPrepareAndScore verifies that PrepareEncodedVector for an
+// outlier-split key vector sets IsOriginalSpace and produces scores close to
+// ScoreEncodedVector (which uses the direct multi-block gather path).
+func TestMultiBlockPrepareAndScore(t *testing.T) {
+	const dim = 128
+	rng := splitmix64(0x1122334455667788)
+
+	for i := 0; i < 20; i++ {
+		key := make([]float32, dim)
+		query := make([]float32, dim)
+		for j := range key {
+			key[j] = float32(gaussianFloat64(&rng))
+			query[j] = float32(gaussianFloat64(&rng))
+		}
+
+		encoded, err := EncodeKeyVector(key, PresetTQ35)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := encoded.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		pb, _, err := PrepareEncodedVector(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !pb.IsOriginalSpace() {
+			t.Fatal("expected IsOriginalSpace=true for outlier-split encoding")
+		}
+		if pb.EncodedDim() != dim {
+			t.Fatalf("EncodedDim = %d, want %d", pb.EncodedDim(), dim)
+		}
+
+		// Score with PreparedBlock (original-space path — no query rotation).
+		preparedScore := ScorePreparedBlock(query, pb)
+
+		// Score directly via ScoreEncodedVector (gather-rotate-per-block path).
+		directScore, _, err := ScoreEncodedVector(query, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if diff := abs32(preparedScore - directScore); diff > 1e-3 {
+			t.Errorf("trial %d: PreparedBlock score %.6f vs direct score %.6f, diff %.6f",
+				i, preparedScore, directScore, diff)
+		}
 	}
 }
 

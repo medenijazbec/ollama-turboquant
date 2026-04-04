@@ -137,14 +137,18 @@ func TestScoreEncodedVectorMatchesDecodedDotForMSERows(t *testing.T) {
 
 func TestProductModeBiasImprovesOverBaseDot(t *testing.T) {
 	trials := 24
+	// Use dim=32 (== OutlierCount) so no outlier split is triggered and block[0]
+	// covers the full vector. This keeps the test focused on QJL bias reduction
+	// without exercising the multi-block path (which is covered separately).
+	const dim = 32
 	var baseErr25 float32
 	var prodErr25 float32
 	var baseErr35 float32
 	var prodErr35 float32
 
 	for i := 0; i < trials; i++ {
-		values := pseudoRandomVector(64, uint64(100+i))
-		query := pseudoRandomVector(64, uint64(200+i))
+		values := pseudoRandomVector(dim, uint64(100+i))
+		query := pseudoRandomVector(dim, uint64(200+i))
 
 		for _, preset := range []Preset{PresetTQ25, PresetTQ35} {
 			encoded, err := EncodeKeyVector(values, preset)
@@ -152,11 +156,11 @@ func TestProductModeBiasImprovesOverBaseDot(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			rotation := BuildRotation(len(values), preset.RotationSeed)
-			codebook, _ := scalarCodebook(len(values), preset.KeyPrimaryBits)
+			rotation := BuildRotation(dim, preset.RotationSeed)
+			codebook, _ := scalarCodebook(dim, preset.KeyPrimaryBits)
 			queryRot := ApplyRotation(query, rotation)
-			decodedBaseRot := make([]float32, len(values))
-			codes := unpackBits(encoded.Blocks[0].RegularIndices, int(encoded.Blocks[0].RegularBits), len(values))
+			decodedBaseRot := make([]float32, dim)
+			codes := unpackBits(encoded.Blocks[0].RegularIndices, int(encoded.Blocks[0].RegularBits), dim)
 			for j, code := range codes {
 				decodedBaseRot[j] = dequantizeScalar(code, codebook)
 			}

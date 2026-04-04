@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	BlockVersion = 4
+	BlockVersion = 6
 
 	AlgorithmPaper = "paper"
 )
@@ -34,6 +34,8 @@ type Preset struct {
 	KeyPrimaryBits  int
 	ValueBits       int
 	QJLRowsDivisor  int
+	OutlierBits     int
+	OutlierCount    int
 }
 
 var (
@@ -41,25 +43,33 @@ var (
 	// a 1-bit QJL residual correction for attention scoring.
 	// Keys: 2-bit primary + 1-bit QJL = 3 bits/elem. Values: 2 bits/elem.
 	// Average: 2.5 bits/elem -- matches paper's Q_prod at b=3, values at b=2.
-	PresetTQ25 = newPreset(1, "tq25", 2, 2, 1, 0x25c0ffee)
+	// Outlier split: 32 channels at 3-bit, 96 channels at 2-bit (paper §4.3).
+	PresetTQ25 = newPreset(1, "tq25", 2, 2, 1, 0x25c0ffee, 3, 32)
 
 	// tq35 uses a 3-bit scalar Lloyd-Max key/value quantizer, with keys gaining
 	// a 1-bit QJL residual correction for attention scoring.
 	// Keys: 3-bit primary + 1-bit QJL = 4 bits/elem. Values: 3 bits/elem.
 	// Average: 3.5 bits/elem -- matches paper's Q_prod at b=4, values at b=3.
-	PresetTQ35 = newPreset(2, "tq35", 3, 3, 1, 0x35c0ffee)
+	// Outlier split: 32 channels at 4-bit, 96 channels at 3-bit (paper §4.3).
+	PresetTQ35 = newPreset(2, "tq35", 3, 3, 1, 0x35c0ffee, 4, 32)
 )
 
-func newPreset(id uint8, name string, keyBits int, valueBits int, qjlRowsDivisor int, seed uint64) Preset {
+func newPreset(id uint8, name string, keyBits int, valueBits int, qjlRowsDivisor int, seed uint64, outlierBits int, outlierCount int) Preset {
 	return Preset{
-		ID:             id,
-		Name:           name,
+		ID:              id,
+		Name:            name,
 		DefaultBlockDim: 0,
-		RotationSeed:   seed,
-		KeyPrimaryBits: keyBits,
-		ValueBits:      valueBits,
-		QJLRowsDivisor: qjlRowsDivisor,
+		RotationSeed:    seed,
+		KeyPrimaryBits:  keyBits,
+		ValueBits:       valueBits,
+		QJLRowsDivisor:  qjlRowsDivisor,
+		OutlierBits:     outlierBits,
+		OutlierCount:    outlierCount,
 	}
+}
+
+func (p Preset) HasOutlierSplit() bool {
+	return p.OutlierBits > 0 && p.OutlierCount > 0
 }
 
 func NormalizePresetName(name string) string {

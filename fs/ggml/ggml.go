@@ -636,21 +636,40 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 			// NOTE: Assumes uniform values for all attn layers
 			switch cacheTypeNorm {
 			case "tq25", "tq35":
-				// TurboQuant reference layout wraps every vector in an
-				// EncodedVector (10 B) + block-length prefix (4 B) + Block fixed
-				// header (50 B) = 64 B of per-vector overhead, independent of dim.
-				// The data payload is ceil(dim × primaryBits / 8) for both key
-				// and value, plus ceil(dim / 8) for the key's QJL sketch.
+				// TurboQuant reference layout (outlier-split, 2 blocks per vector):
+				//
+				// Fixed overhead per vector:
+				//   10 B EncodedVector header + 2 × (4 B blockLen + 52 B Block header)
+				//   = 122 B, plus 2 B per channel for ChannelIndices across both blocks
+				//   → 122 + 2×dim bytes of fixed overhead.
+				//
+				// Data payload (per-vector, added to both key and value independently):
+				//   ceil(outlierCount×outlierBits/8) for the outlier sub-block primary indices,
+				//   ceil((dim−outlierCount)×regularBits/8) for the regular sub-block, and
+				//   ceil(outlierCount/8) QJL sketch for the key outlier block only.
+				//
 				// Using kvCacheBytesPerElement (the paper's ideal rate) would
-				// under-estimate memory by 2-3×, causing OOM at long contexts.
-				keyBits := uint64(2)
-				valueBits := uint64(2)
+				// under-estimate memory by ~10×, causing OOM at long contexts.
+				// Example: tq25 dim=128 → 832 B actual vs. 80 B ideal.
+				const tqOutlierCount = uint64(32)
+				var outlierBits, regularKeyBits, regularValueBits uint64
 				if cacheTypeNorm == "tq35" {
-					keyBits = 3
-					valueBits = 3
+					outlierBits, regularKeyBits, regularValueBits = 4, 3, 3
+				} else {
+					outlierBits, regularKeyBits, regularValueBits = 3, 2, 2
 				}
-				keyBytes := uint64(64) + (embeddingHeadsK*keyBits+7)/8 + (embeddingHeadsK+7)/8
-				valueBytes := uint64(64) + (embeddingHeadsV*valueBits+7)/8
+				// Guard against architectures with headDim <= 32 where uint64
+				// subtraction would wrap. Fall through to default for those.
+				if embeddingHeadsK <= tqOutlierCount || embeddingHeadsV <= tqOutlierCount {
+					kv[i] = uint64(float64(context*(embeddingHeadsK+embeddingHeadsV)*headsKVL) * bytesPerElement)
+					break
+				}
+				outlierData := (tqOutlierCount*outlierBits + 7) / 8
+				qjlData := (tqOutlierCount + 7) / 8
+				keyBytes := uint64(122) + 2*embeddingHeadsK +
+					outlierData + ((embeddingHeadsK-tqOutlierCount)*regularKeyBits+7)/8 + qjlData
+				valueBytes := uint64(122) + 2*embeddingHeadsV +
+					outlierData + ((embeddingHeadsV-tqOutlierCount)*regularValueBits+7)/8
 				kv[i] = (keyBytes + valueBytes) * headsKVL * context
 			default:
 				kv[i] = uint64(float64(context*(embeddingHeadsK+embeddingHeadsV)*headsKVL) * bytesPerElement)

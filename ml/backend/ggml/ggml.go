@@ -1910,7 +1910,15 @@ func turboQuantAttentionScores(ctx ml.Context, query, key ml.Tensor) ml.Tensor {
 		panic(fmt.Sprintf("invalid turboquant kv head mapping: query heads %d kv heads %d", numHeads, kvHeads))
 	}
 	groupSize := numHeads / kvHeads
-	rotation := turboquant.RotationForBlock(preparedBlocks[0])
+
+	// For multi-block (outlier-split) cells, dequant and corrVec are already in
+	// original space — the query must NOT be rotated. Single-block cells use the
+	// shared rotation to pre-rotate the query into the same space as the keys.
+	isOriginalSpace := preparedBlocks[0].IsOriginalSpace()
+	var rotation turboquant.Rotation
+	if !isOriginalSpace {
+		rotation = turboquant.RotationForBlock(preparedBlocks[0])
+	}
 
 	// Pack PreparedBlock data into flat C-accessible arrays once (before the
 	// parallel head loop) so each (head, query) goroutine can call the C kernel
@@ -1956,11 +1964,16 @@ func turboQuantAttentionScores(ctx ml.Context, query, key ml.Tensor) ml.Tensor {
 					queryVector[d] = queryFloats[d+headDim*q+headDim*seqLenQ*head]
 				}
 				expandedQuery := queryVectorForKVHead(queryVector, kvHead, kvHeads)
-				queryRotated := turboquant.ApplyRotation(expandedQuery, rotation)
-				queryNorm := turboquant.QueryNorm(queryRotated)
+				var queryForScoring []float32
+				if isOriginalSpace {
+					queryForScoring = expandedQuery
+				} else {
+					queryForScoring = turboquant.ApplyRotation(expandedQuery, rotation)
+				}
+				queryNorm := turboquant.QueryNorm(queryForScoring)
 
 				base := cachedSize*q + cachedSize*seqLenQ*head
-				scoreTurboQuantCellsCUDA(queryRotated, queryNorm, dequantFlat, corrFlat, residNorms, encodedDim, cachedSize, kqData[base:])
+				scoreTurboQuantCellsCUDA(queryForScoring, queryNorm, dequantFlat, corrFlat, residNorms, encodedDim, cachedSize, kqData[base:])
 			}
 		}
 	} else {
@@ -1978,11 +1991,16 @@ func turboQuantAttentionScores(ctx ml.Context, query, key ml.Tensor) ml.Tensor {
 						queryVector[d] = queryFloats[d+headDim*q+headDim*seqLenQ*head]
 					}
 					expandedQuery := queryVectorForKVHead(queryVector, kvHead, kvHeads)
-					queryRotated := turboquant.ApplyRotation(expandedQuery, rotation)
-					queryNorm := turboquant.QueryNorm(queryRotated)
+					var queryForScoring []float32
+					if isOriginalSpace {
+						queryForScoring = expandedQuery
+					} else {
+						queryForScoring = turboquant.ApplyRotation(expandedQuery, rotation)
+					}
+					queryNorm := turboquant.QueryNorm(queryForScoring)
 
 					base := cachedSize*q + cachedSize*seqLenQ*head
-					scoreTurboQuantCells(queryRotated, queryNorm, dequantFlat, corrFlat, residNorms, encodedDim, cachedSize, kqData[base:])
+					scoreTurboQuantCells(queryForScoring, queryNorm, dequantFlat, corrFlat, residNorms, encodedDim, cachedSize, kqData[base:])
 				}
 			}(head)
 		}

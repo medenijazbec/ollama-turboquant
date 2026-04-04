@@ -41,7 +41,7 @@ func buildLloydMaxCodebook(dim int, bits int) []float32 {
 		return []float32{0}
 	}
 
-	samples := standardNormalSamples(dim, bits, 65536)
+	samples := unitVectorCoordSamples(dim, bits, 65536)
 	slices.Sort(samples)
 
 	centroids := make([]float64, levels)
@@ -97,11 +97,39 @@ func buildLloydMaxCodebook(dim int, bits int) []float32 {
 	return codebook
 }
 
-func standardNormalSamples(dim int, bits int, count int) []float64 {
+// unitVectorCoordSamples returns count samples from the exact marginal
+// distribution of a single coordinate of a uniformly random unit vector in R^d:
+//
+//	z_1 / ‖z‖ · √d,  z ~ N(0, I_d)
+//
+// For large d this converges to N(0,1); for smaller d the heavier tails of the
+// Beta((d-3)/2,(d-3)/2) coordinate distribution are preserved. Using this
+// distribution — rather than pure N(0,1) — produces the optimal Lloyd-Max
+// codebook for the actual coordinate distribution that arises after RMS
+// normalization and random rotation (Paper §3.1, Eq. 4, Lemma 1).
+func unitVectorCoordSamples(dim int, bits int, count int) []float64 {
 	rng := splitmix64(uint64(bits+1)<<48 ^ uint64(dim+1)<<16 ^ 0x4d595df4d0f33173)
 	out := make([]float64, count)
+	if dim <= 1 {
+		for i := range out {
+			out[i] = gaussianFloat64(&rng)
+		}
+		return out
+	}
+	sqrtDim := math.Sqrt(float64(dim))
 	for i := range out {
-		out[i] = gaussianFloat64(&rng)
+		z0 := gaussianFloat64(&rng)
+		sumSq := z0 * z0
+		for k := 1; k < dim; k++ {
+			g := gaussianFloat64(&rng)
+			sumSq += g * g
+		}
+		norm := math.Sqrt(sumSq)
+		if norm < 1e-15 {
+			out[i] = 0
+		} else {
+			out[i] = z0 / norm * sqrtDim
+		}
 	}
 	return out
 }

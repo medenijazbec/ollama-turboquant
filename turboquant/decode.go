@@ -18,26 +18,52 @@ import (
 //
 // Scoring reduces to two O(dim) dot products with no table lookups or
 // per-query Gaussian sampling, letting the compiler and C/CUDA kernels SIMD-ize.
+//
+// For multi-block (outlier-split) encodings, isOriginalSpace is true and dequant
+// and correctionVec are scattered into the full original-space dim. The query
+// must NOT be rotated before scoring — dot(q, dequant_orig) equals dot(Rq, dequant_rot).
 type PreparedBlock struct {
-	block         Block
-	dequant       []float32 // pre-dequantized: codebook[index] * scale per coordinate
-	correctionVec []float32 // precomputed QJL correction vector (nil for MSE-only blocks)
-	residualNorm  float32   // residual L2 norm; used for Cauchy-Schwarz clamping
-	rotation      Rotation
+	block           Block
+	dim             int       // full original vector dim (matches EncodedVector.Dim)
+	dequant         []float32 // pre-dequantized: codebook[index] * scale per coordinate
+	correctionVec   []float32 // precomputed QJL correction vector (nil for MSE-only blocks)
+	residualNorm    float32   // residual L2 norm; used for Cauchy-Schwarz clamping
+	rotation        Rotation  // valid only when !isOriginalSpace
+	isOriginalSpace bool      // true for multi-block: dequant/corrVec are in original space
 }
+
+// IsOriginalSpace reports whether dequant and correctionVec are in original
+// (unrotated) space. When true, the query must NOT be rotated before scoring.
+func (pb PreparedBlock) IsOriginalSpace() bool { return pb.isOriginalSpace }
 
 // PrepareEncodedVector parses a key row once and pre-resolves the rotation,
 // codebook, dequantized values, and QJL correction vector so that
 // ScorePreparedBlock can score it against many queries with two plain float32
 // dot products and no per-call allocations or Gaussian sampling.
+//
+// For single-block encodings, dequant and corrVec are in rotated space and the
+// caller must rotate the query with RotationForBlock before scoring.
+//
+// For multi-block (outlier-split) encodings, dequant and corrVec are scattered
+// into the full original-space dim (IsOriginalSpace() == true) — the query must
+// NOT be rotated before scoring.
 func PrepareEncodedVector(data []byte) (PreparedBlock, Preset, error) {
 	ev, err := UnmarshalEncodedVector(data)
 	if err != nil {
 		return PreparedBlock{}, Preset{}, err
 	}
-	if len(ev.Blocks) != 1 {
-		return PreparedBlock{}, Preset{}, fmt.Errorf("PrepareEncodedVector expects exactly 1 block, got %d", len(ev.Blocks))
+	if len(ev.Blocks) == 0 {
+		return PreparedBlock{}, Preset{}, fmt.Errorf("PrepareEncodedVector: no blocks")
 	}
+
+	// Multi-block (outlier-split) path: scatter each sub-block's dequant and
+	// corrVec into full-dim original-space arrays.
+	isMultiBlock := len(ev.Blocks) > 1 || len(ev.Blocks[0].ChannelIndices) > 0
+	if isMultiBlock {
+		return prepareMultiBlock(ev)
+	}
+
+	// Single-block legacy path (unchanged behavior).
 	b := ev.Blocks[0]
 	dim := int(b.OriginalDim)
 	codebook, _ := scalarCodebook(dim, int(b.RegularBits))
@@ -55,10 +81,84 @@ func PrepareEncodedVector(data []byte) (PreparedBlock, Preset, error) {
 	}
 	return PreparedBlock{
 		block:         b,
+		dim:           ev.Dim,
 		dequant:       dequant,
 		correctionVec: corrVec,
 		residualNorm:  residNorm,
 		rotation:      rotation,
+	}, ev.Preset, nil
+}
+
+// prepareMultiBlock handles the outlier-split path: for each sub-block, dequant
+// and optional corrVec are computed in rotated space, inverse-rotated to original
+// space, then scattered into full-dim arrays.
+func prepareMultiBlock(ev EncodedVector) (PreparedBlock, Preset, error) {
+	fullDequant := make([]float32, ev.Dim)
+	var fullCorrVec []float32
+	var residNormSq float64
+
+	hasProduct := false
+	for _, b := range ev.Blocks {
+		if vectorObjective(b.Objective) == objectiveProduct {
+			hasProduct = true
+			break
+		}
+	}
+	if hasProduct {
+		fullCorrVec = make([]float32, ev.Dim)
+	}
+
+	for _, b := range ev.Blocks {
+		blockDim := int(b.OriginalDim)
+		codebook, _ := scalarCodebook(blockDim, int(b.RegularBits))
+		indices := unpackBits(b.RegularIndices, int(b.RegularBits), blockDim)
+		dequantRot := make([]float32, blockDim)
+		for i, idx := range indices {
+			dequantRot[i] = dequantizeScalar(idx, codebook) * b.Scale
+		}
+
+		rot := BuildRotation(blockDim, b.RotationSeed)
+		dequantOrig := ApplyInverseRotation(dequantRot, rot)
+
+		if len(b.ChannelIndices) == blockDim {
+			for i, chIdx := range b.ChannelIndices {
+				fullDequant[chIdx] = dequantOrig[i]
+			}
+		} else {
+			// No ChannelIndices: block covers a contiguous prefix (shouldn't happen
+			// in multi-block, but handle gracefully by treating as offset 0).
+			copy(fullDequant, dequantOrig)
+		}
+
+		if vectorObjective(b.Objective) == objectiveProduct && b.Residual.Scale > 0 {
+			corrRotated := PrecomputeCorrectionVec(b.Residual, blockDim)
+			if corrRotated != nil {
+				corrOrig := ApplyInverseRotation(corrRotated, rot)
+				if len(b.ChannelIndices) == blockDim {
+					for i, chIdx := range b.ChannelIndices {
+						fullCorrVec[chIdx] = corrOrig[i]
+					}
+				} else {
+					copy(fullCorrVec, corrOrig)
+				}
+			}
+			residNormSq += float64(b.Residual.Scale) * float64(b.Residual.Scale)
+		}
+	}
+
+	residNorm := float32(math.Sqrt(residNormSq))
+	if !hasProduct || residNorm == 0 {
+		fullCorrVec = nil
+	}
+
+	return PreparedBlock{
+		block:           ev.Blocks[0],
+		dim:             ev.Dim,
+		dequant:         fullDequant,
+		correctionVec:   fullCorrVec,
+		residualNorm:    residNorm,
+		rotation:        Rotation{}, // not used; caller should check IsOriginalSpace
+		isOriginalSpace: true,
 	}, ev.Preset, nil
 }
 
@@ -77,9 +177,8 @@ func QueryNorm(queryRotated []float32) float32 {
 // and a pre-parsed key block. queryRotated must already be rotated with the
 // same rotation matrix used during encoding (BuildRotation(dim, block.RotationSeed)).
 //
-// Both the primary dot product and the optional QJL correction are pure float32
-// dot products — the Go compiler can auto-vectorize them and a C/CUDA kernel
-// can use SIMD without any table lookups or per-call Gaussian sampling.
+// For multi-block (outlier-split) blocks where IsOriginalSpace() is true, pass
+// the original (unrotated) query instead — the caller must NOT rotate the query.
 //
 // For hot paths scoring many cells against the same query, prefer
 // ScorePreparedBlockN which accepts a precomputed queryNorm.
@@ -114,13 +213,14 @@ func ScorePreparedBlockN(queryRotated []float32, queryNorm float32, pb PreparedB
 
 // RotationForBlock returns the rotation matrix for a prepared block, so the
 // caller can pre-rotate a query once and reuse it across many ScorePreparedBlock calls.
+// Only valid when IsOriginalSpace() is false (single-block encodings).
 func RotationForBlock(pb PreparedBlock) Rotation {
 	return pb.rotation
 }
 
-// EncodedDim returns the original vector dimension stored in the block.
+// EncodedDim returns the original vector dimension stored in the prepared block.
 func (pb PreparedBlock) EncodedDim() int {
-	return int(pb.block.OriginalDim)
+	return pb.dim
 }
 
 // Dequant returns the pre-dequantized key values (codebook[index] × scale).
@@ -150,21 +250,33 @@ func ScoreEncodedVector(query []float32, data []byte) (float32, Preset, error) {
 	}
 
 	var total float32
-	offset := 0
 	for _, block := range ev.Blocks {
 		blockDim := int(block.OriginalDim)
 		rotation := BuildRotation(blockDim, block.RotationSeed)
-		queryRot := ApplyRotation(query[offset:offset+blockDim], rotation)
+
+		// Gather the query channels for this sub-block.
+		var subQuery []float32
+		if len(block.ChannelIndices) == blockDim {
+			subQuery = make([]float32, blockDim)
+			for i, chIdx := range block.ChannelIndices {
+				subQuery[i] = query[chIdx]
+			}
+		} else {
+			// Legacy single-block: contiguous range starting at 0.
+			subQuery = query[:blockDim]
+		}
+
+		queryRot := ApplyRotation(subQuery, rotation)
 		codebook, _ := scalarCodebook(blockDim, int(block.RegularBits))
 		indices := unpackBits(block.RegularIndices, int(block.RegularBits), blockDim)
-		// Implemented checkpoint-visible V-path audit notes so inverse-WHT/dequant review can confirm FP32 accumulation sites instead of assuming half precision; idea source: @AmesianX.
+		// FP32 accumulation audit: decode accumulates in float32; any future half-precision
+		// backend must preserve FP32-accumulate semantics.
 		for i, idx := range indices {
 			total += queryRot[i] * (dequantizeScalar(idx, codebook) * block.Scale)
 		}
 		if vectorObjective(block.Objective) == objectiveProduct {
 			total += residualDotCorrection(queryRot, block.Residual)
 		}
-		offset += blockDim
 	}
 
 	return total, ev.Preset, nil
@@ -176,13 +288,15 @@ func DecodeVector(data []byte) ([]float32, Preset, error) {
 		return nil, Preset{}, err
 	}
 
-	decoded := make([]float32, 0, ev.Dim)
+	decoded := make([]float32, ev.Dim)
+	offset := 0
 	for _, block := range ev.Blocks {
 		blockDim := int(block.OriginalDim)
 		codebook, _ := scalarCodebook(blockDim, int(block.RegularBits))
 		indices := unpackBits(block.RegularIndices, int(block.RegularBits), blockDim)
 		rotated := make([]float32, blockDim)
-		// The decode/reconstruct path accumulates in float32 here; any future half-precision backend mirror must preserve FP32-accumulate semantics for V reconstruction.
+		// FP32 accumulation audit: decode accumulates in float32; any future half-precision
+		// backend must preserve FP32-accumulate semantics for V reconstruction.
 		for i, idx := range indices {
 			rotated[i] = dequantizeScalar(idx, codebook) * block.Scale
 		}
@@ -192,12 +306,20 @@ func DecodeVector(data []byte) ([]float32, Preset, error) {
 				rotated[i] += residual[i]
 			}
 		}
-		decoded = append(decoded, ApplyInverseRotation(rotated, BuildRotation(blockDim, block.RotationSeed))...)
+		original := ApplyInverseRotation(rotated, BuildRotation(blockDim, block.RotationSeed))
+
+		if len(block.ChannelIndices) == blockDim {
+			// Scatter to original channel positions.
+			for i, chIdx := range block.ChannelIndices {
+				decoded[chIdx] = original[i]
+			}
+		} else {
+			// Legacy single-block: fill contiguous range.
+			copy(decoded[offset:], original)
+			offset += blockDim
+		}
 	}
 
-	if len(decoded) != ev.Dim {
-		return nil, Preset{}, fmt.Errorf("decoded dim %d does not match header dim %d", len(decoded), ev.Dim)
-	}
 	return decoded, ev.Preset, nil
 }
 

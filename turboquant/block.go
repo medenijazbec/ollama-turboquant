@@ -20,6 +20,7 @@ type Block struct {
 	CodebookID     uint16
 	QJLRows        uint16
 	AuxLayoutID    uint8
+	ChannelIndices []uint16
 	Scale          float32
 	RegularIndices []byte
 	Residual       ResidualSketch
@@ -40,6 +41,7 @@ func (b Block) MarshalBinary() ([]byte, error) {
 		b.CodebookID,
 		b.QJLRows,
 		b.AuxLayoutID,
+		uint16(len(b.ChannelIndices)),
 		b.Scale,
 		uint32(len(b.RegularIndices)),
 		b.Residual.Seed,
@@ -52,6 +54,11 @@ func (b Block) MarshalBinary() ([]byte, error) {
 			return nil, err
 		}
 	}
+	for _, idx := range b.ChannelIndices {
+		if err := binary.Write(&buf, binary.LittleEndian, idx); err != nil {
+			return nil, err
+		}
+	}
 	buf.Write(b.RegularIndices)
 	buf.Write(b.Residual.Signs)
 	return buf.Bytes(), nil
@@ -59,6 +66,7 @@ func (b Block) MarshalBinary() ([]byte, error) {
 
 func (b *Block) UnmarshalBinary(data []byte) error {
 	r := bytes.NewReader(data)
+	var channelCount uint16
 	var regularLen, residualLen uint32
 	fields := []any{
 		&b.Version,
@@ -73,6 +81,7 @@ func (b *Block) UnmarshalBinary(data []byte) error {
 		&b.CodebookID,
 		&b.QJLRows,
 		&b.AuxLayoutID,
+		&channelCount,
 		&b.Scale,
 		&regularLen,
 		&b.Residual.Seed,
@@ -93,6 +102,15 @@ func (b *Block) UnmarshalBinary(data []byte) error {
 	}
 	if b.OriginalDim == 0 || b.OriginalDim > b.PaddedDim || b.BlockDim != b.PaddedDim {
 		return fmt.Errorf("invalid block dims: original=%d padded=%d block=%d", b.OriginalDim, b.PaddedDim, b.BlockDim)
+	}
+
+	if channelCount > 0 {
+		b.ChannelIndices = make([]uint16, channelCount)
+		for i := range b.ChannelIndices {
+			if err := binary.Read(r, binary.LittleEndian, &b.ChannelIndices[i]); err != nil {
+				return err
+			}
+		}
 	}
 
 	b.RegularIndices = make([]byte, regularLen)

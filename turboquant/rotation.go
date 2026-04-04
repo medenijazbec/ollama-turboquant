@@ -70,9 +70,9 @@ func ApplyInverseRotation(y []float32, rot Rotation) []float32 {
 // buildOrthogonalMatrix returns a dim×dim orthogonal matrix derived from the
 // given seed using Householder QR factorisation. The input is the same seeded
 // Gaussian matrix used by the previous Gram-Schmidt path, but the QR Q-factor
-// is numerically unconditionally orthogonal. This algorithm replaces the
-// classical Gram-Schmidt used through BlockVersion 3; the output matrix differs
-// for the same seed, hence the BlockVersion bump to 4.
+// is numerically unconditionally orthogonal. This algorithm replaced the
+// classical Gram-Schmidt used through BlockVersion 3; the Householder path was
+// introduced at BlockVersion 4 (current: BlockVersion 6).
 //
 // Algorithm: apply dim-1 Householder reflectors H_1…H_{dim-1} from the left
 // to reduce A to upper triangular form R. Simultaneously accumulate
