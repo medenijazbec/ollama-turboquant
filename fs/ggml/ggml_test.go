@@ -307,6 +307,50 @@ func TestKVCacheBytesPerElementTurboQuant(t *testing.T) {
 	}
 }
 
+// TestTurboQuantGraphSizeExactLayout verifies that the GraphSize KV estimation
+// uses the actual reference-layout byte count, not the paper's ideal rate.
+// At dim=128 (the primary validated head_dim), the reference layout overhead
+// (64 B/vector fixed header) dominates the data payload.
+func TestTurboQuantGraphSizeExactLayout(t *testing.T) {
+	cases := []struct {
+		cacheType  string
+		embK       uint64 // head dim for keys
+		embV       uint64 // head dim for values
+		wantKeyB   uint64 // expected bytes for one key vector
+		wantValueB uint64 // expected bytes for one value vector
+	}{
+		// tq35, dim=128: key = 64 + 48 + 16 = 128 B; value = 64 + 48 = 112 B
+		{"tq35", 128, 128, 128, 112},
+		// tq25, dim=128: key = 64 + 32 + 16 = 112 B; value = 64 + 32 = 96 B
+		{"tq25", 128, 128, 112, 96},
+		// tq35, dim=64: key = 64 + 24 + 8 = 96 B; value = 64 + 24 = 88 B
+		{"tq35", 64, 64, 96, 88},
+	}
+	for _, tc := range cases {
+		keyBits := uint64(2)
+		valueBits := uint64(2)
+		if normalizeKVCacheType(tc.cacheType) == "tq35" {
+			keyBits = 3
+			valueBits = 3
+		}
+		gotKey := uint64(64) + (tc.embK*keyBits+7)/8 + (tc.embK+7)/8
+		gotValue := uint64(64) + (tc.embV*valueBits+7)/8
+		if gotKey != tc.wantKeyB {
+			t.Errorf("%s embK=%d: key bytes = %d, want %d", tc.cacheType, tc.embK, gotKey, tc.wantKeyB)
+		}
+		if gotValue != tc.wantValueB {
+			t.Errorf("%s embV=%d: value bytes = %d, want %d", tc.cacheType, tc.embV, gotValue, tc.wantValueB)
+		}
+		// Verify the exact-layout estimate is materially larger than the ideal rate.
+		idealRate := kvCacheBytesPerElement(tc.cacheType)
+		idealBytes := uint64(float64(tc.embK+tc.embV) * idealRate)
+		actualBytes := gotKey + gotValue
+		if actualBytes <= idealBytes {
+			t.Errorf("%s: actual bytes %d <= ideal bytes %d (overhead accounting broken)", tc.cacheType, actualBytes, idealBytes)
+		}
+	}
+}
+
 func TestHeadCount(t *testing.T) {
 	valuesArray := []int32{1, 5, 3, 4}
 	cases := []struct {

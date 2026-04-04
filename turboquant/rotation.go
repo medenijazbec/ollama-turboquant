@@ -67,46 +67,97 @@ func ApplyInverseRotation(y []float32, rot Rotation) []float32 {
 	return out
 }
 
+// buildOrthogonalMatrix returns a dim×dim orthogonal matrix derived from the
+// given seed using Householder QR factorisation. The input is the same seeded
+// Gaussian matrix used by the previous Gram-Schmidt path, but the QR Q-factor
+// is numerically unconditionally orthogonal. This algorithm replaces the
+// classical Gram-Schmidt used through BlockVersion 3; the output matrix differs
+// for the same seed, hence the BlockVersion bump to 4.
+//
+// Algorithm: apply dim-1 Householder reflectors H_1…H_{dim-1} from the left
+// to reduce A to upper triangular form R. Simultaneously accumulate
+// Q = H_1 * H_2 * … * H_{dim-1} by right-multiplying each reflector into Q,
+// starting from the identity. The resulting Q is the orthogonal factor in
+// A = QR and has orthonormal rows and columns.
 func buildOrthogonalMatrix(dim int, seed uint64) []float32 {
 	if dim <= 0 {
 		return nil
 	}
 
-	rows := make([][]float64, dim)
+	// Initialise A with the same seeded Gaussian rows as before.
+	a := make([][]float64, dim)
 	for row := 0; row < dim; row++ {
-		rows[row] = make([]float64, dim)
+		a[row] = make([]float64, dim)
 		rng := splitmix64(seed ^ uint64(dim)<<32 ^ uint64(row+1)*0x9e3779b97f4a7c15)
 		for col := 0; col < dim; col++ {
-			rows[row][col] = gaussianFloat64(&rng)
+			a[row][col] = gaussianFloat64(&rng)
 		}
 	}
 
-	for row := 0; row < dim; row++ {
-		current := rows[row]
-		for prev := 0; prev < row; prev++ {
-			prevRow := rows[prev]
-			proj := dotFloat64(current, prevRow)
-			for col := 0; col < dim; col++ {
-				current[col] -= proj * prevRow[col]
+	// Q starts as the identity; we accumulate Q = H_1 * … * H_{dim-1}.
+	q := make([][]float64, dim)
+	for i := range q {
+		q[i] = make([]float64, dim)
+		q[i][i] = 1.0
+	}
+
+	v := make([]float64, dim) // scratch buffer for the Householder vector
+
+	for k := 0; k < dim-1; k++ {
+		n := dim - k
+
+		// Build Householder vector for column k, rows k..dim-1.
+		// Sign chosen to avoid cancellation: sigma = −sign(a[k][k]) * ||x||.
+		for i := 0; i < n; i++ {
+			v[i] = a[k+i][k]
+		}
+		sigma := vectorNorm64(v[:n])
+		if v[0] >= 0 {
+			sigma = -sigma
+		}
+		v[0] -= sigma
+		vnorm2 := dotFloat64(v[:n], v[:n])
+		if vnorm2 < 1e-28 {
+			continue // column already zeroed — no reflector needed
+		}
+		beta := 2.0 / vnorm2
+
+		// Apply H_k to a[k:, k:] from the left.
+		for j := k; j < dim; j++ {
+			var dot float64
+			for i := 0; i < n; i++ {
+				dot += v[i] * a[k+i][j]
+			}
+			dot *= beta
+			for i := 0; i < n; i++ {
+				a[k+i][j] -= dot * v[i]
 			}
 		}
 
-		norm := vectorNorm64(current)
-		if norm < 1e-12 {
-			current[row%dim] += 1
-			norm = vectorNorm64(current)
+		// Apply H_k to q[:, k:] from the right: q ← q * H_k.
+		for i := 0; i < dim; i++ {
+			var dot float64
+			for j := 0; j < n; j++ {
+				dot += q[i][k+j] * v[j]
+			}
+			dot *= beta
+			for j := 0; j < n; j++ {
+				q[i][k+j] -= dot * v[j]
+			}
 		}
-		for col := 0; col < dim; col++ {
-			current[col] /= norm
-		}
+	}
 
-		for _, value := range current {
+	// Sign-normalise each row so the first non-negligible element is positive.
+	// This convention matches the previous Gram-Schmidt path and makes the
+	// output deterministic despite the reflector sign ambiguity.
+	for row := 0; row < dim; row++ {
+		for _, value := range q[row] {
 			if math.Abs(value) <= 1e-12 {
 				continue
 			}
 			if value < 0 {
 				for col := 0; col < dim; col++ {
-					current[col] = -current[col]
+					q[row][col] = -q[row][col]
 				}
 			}
 			break
@@ -116,7 +167,7 @@ func buildOrthogonalMatrix(dim int, seed uint64) []float32 {
 	out := make([]float32, dim*dim)
 	for row := 0; row < dim; row++ {
 		for col := 0; col < dim; col++ {
-			out[row*dim+col] = float32(rows[row][col])
+			out[row*dim+col] = float32(q[row][col])
 		}
 	}
 	return out

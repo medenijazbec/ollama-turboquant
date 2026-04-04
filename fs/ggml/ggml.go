@@ -612,6 +612,7 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 	layers := f.Tensors().GroupLayers()
 
 	bytesPerElement := kvCacheBytesPerElement(kvCacheType)
+	cacheTypeNorm := normalizeKVCacheType(kvCacheType)
 
 	// Default for models unless special-cased below. These defaults mirror the
 	// cache usage in llama.cpp under the assumption that models without special
@@ -633,7 +634,27 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 		if headsL > 0 && headsKVL > 0 {
 			// full attention layer
 			// NOTE: Assumes uniform values for all attn layers
-			kv[i] = uint64(float64(context*(embeddingHeadsK+embeddingHeadsV)*headsKVL) * bytesPerElement)
+			switch cacheTypeNorm {
+			case "tq25", "tq35":
+				// TurboQuant reference layout wraps every vector in an
+				// EncodedVector (10 B) + block-length prefix (4 B) + Block fixed
+				// header (50 B) = 64 B of per-vector overhead, independent of dim.
+				// The data payload is ceil(dim × primaryBits / 8) for both key
+				// and value, plus ceil(dim / 8) for the key's QJL sketch.
+				// Using kvCacheBytesPerElement (the paper's ideal rate) would
+				// under-estimate memory by 2-3×, causing OOM at long contexts.
+				keyBits := uint64(2)
+				valueBits := uint64(2)
+				if cacheTypeNorm == "tq35" {
+					keyBits = 3
+					valueBits = 3
+				}
+				keyBytes := uint64(64) + (embeddingHeadsK*keyBits+7)/8 + (embeddingHeadsK+7)/8
+				valueBytes := uint64(64) + (embeddingHeadsV*valueBits+7)/8
+				kv[i] = (keyBytes + valueBytes) * headsKVL * context
+			default:
+				kv[i] = uint64(float64(context*(embeddingHeadsK+embeddingHeadsV)*headsKVL) * bytesPerElement)
+			}
 			kvSizeAttn += kv[i]
 		} else {
 			// recurrent layer

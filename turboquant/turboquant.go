@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	BlockVersion = 3
+	BlockVersion = 4
 
 	AlgorithmPaper = "paper"
 )
