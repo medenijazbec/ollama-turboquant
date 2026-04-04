@@ -89,6 +89,9 @@ func TestSupportsTurboQuantFastPathRequiresFlashAttention(t *testing.T) {
 	if !ok {
 		t.Fatal("backend does not implement TurboQuantBackend")
 	}
+	// setupBackend creates a CPU-only backend (tiny GGUF, no model weights).
+	// TurboQuantSupport() inspects b.schedBackends; with no GPU-resident
+	// tensors it will always report CPU=true regardless of CUDA availability.
 	if support := tqBackendFlash.TurboQuantSupport(); !support.CPU || support.CUDA || !support.ReferencePackedKCPU || support.BackendPackedKCPU || support.BackendPackedVCPU {
 		t.Fatalf("TurboQuantSupport() = %+v with flash attention on CPU-only backend, want CPU only", support)
 	}

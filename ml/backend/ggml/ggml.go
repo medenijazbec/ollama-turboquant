@@ -705,8 +705,24 @@ func (b *Backend) TurboQuantSupport() ml.TurboQuantSupport {
 		dev := C.ggml_backend_get_device(backend)
 		switch C.ggml_backend_dev_type(dev) {
 		case C.GGML_BACKEND_DEVICE_TYPE_GPU, C.GGML_BACKEND_DEVICE_TYPE_IGPU:
-			// @Madreag: V-side turbo path is gated on Flash Attention support.
-			// Implemented explicit unsupported-V fallback reporting in the backend path instead of ambiguous degradation; idea source: @TheTom.
+			// When the CUDA scoring kernel is compiled in and a device is
+			// accessible, enable the GPU fast path. Without the cuda build tag
+			// cudaAvailable() is always false and we fall through to the
+			// CPU-only return below.
+			if cudaAvailable() {
+				return ml.TurboQuantSupport{
+					// CPU=true: when cachedSize < turboQuantCUDAThreshold the
+					// scoring dispatcher falls back to the parallel goroutine CPU
+					// path, so both capabilities are genuinely available.
+					CPU:  true,
+					CUDA: true,
+					// KCUDA: reserved for a future K-only asymmetric GPU path;
+					// no consumer reads this field yet — see ml/backend.go:45.
+					ReferencePackedKCPU:    true,
+					RequiresFlashAttention: true,
+				}
+			}
+			// GPU present but no CUDA kernel compiled — no fast path.
 			return ml.TurboQuantSupport{RequiresFlashAttention: true}
 		}
 	}
@@ -1768,15 +1784,17 @@ func (t *Tensor) ScaledDotProductAttention(ctx ml.Context, key, value, mask, sin
 		kqMask = mask.(*Tensor).t
 	}
 
+	// Evaluate TurboQuant support once; avoid repeated CGO calls into schedBackends.
+	tqSupport := t.b.TurboQuantSupport()
 	if key.DType() == ml.DTypeTQ25 || key.DType() == ml.DTypeTQ35 {
-		if !t.b.TurboQuantSupport().CPU {
-			slog.Debug("skipping turboquant cpu attention fast path", "dtype", key.DType(), "reason", "backend does not support fast path")
+		if !tqSupport.CPU && !tqSupport.CUDA {
+			slog.Debug("skipping turboquant attention fast path", "dtype", key.DType(), "reason", "backend does not support fast path")
 		}
 	}
 
 	query := t.Permute(ctx, 0, 2, 1, 3)
-	if (key.DType() == ml.DTypeTQ25 || key.DType() == ml.DTypeTQ35) && t.b.TurboQuantSupport().CPU {
-		slog.Debug("using turboquant cpu attention fast path", "dtype", key.DType(), "cpu_only", true)
+	if (key.DType() == ml.DTypeTQ25 || key.DType() == ml.DTypeTQ35) && (tqSupport.CPU || tqSupport.CUDA) {
+		slog.Debug("using turboquant attention fast path", "dtype", key.DType(), "cudaCapable", tqSupport.CUDA)
 		kq := turboQuantAttentionScores(ctx, query, key)
 		kq = &Tensor{
 			b: t.b,
@@ -1786,6 +1804,21 @@ func (t *Tensor) ScaledDotProductAttention(ctx ml.Context, key, value, mask, sin
 			C.ggml_soft_max_add_sinks(kq.(*Tensor).t, sinks.(*Tensor).t)
 		}
 
+		// Permute value from [headDimV, kvHeads, cachedSize] (ne[0,1,2]) to
+		// [cachedSize, headDimV, kvHeads] so that value.ne[0] = cachedSize
+		// equals kq.ne[0], satisfying ggml_mul_mat's inner-dim constraint.
+		// The result kqv has shape [headDimV, seqLen, numHeads], which
+		// kqv.Permute(0,2,1,3) below reshapes to the flash-attention-compatible
+		// [headDimV, numHeads, seqLen] output.
+		//
+		// ggml_permute(a, ax0,ax1,ax2,ax3) places old axis j at new position
+		// ax_j (inverse of the axis-selection convention), so:
+		//   Permute(1,2,0,3): old.ne[0]→new.ne[1], old.ne[1]→new.ne[2],
+		//                     old.ne[2]→new.ne[0], old.ne[3]→new.ne[3]
+		// This matches the value permutation in the non-SDPA fallback path
+		// (ml/nn/attention.go:66) and the standard convention for batched
+		// attention value layout.
+		value = value.Permute(ctx, 1, 2, 0, 3).Contiguous(ctx)
 		kqv := value.Mulmat(ctx, kq)
 		if vmla != nil {
 			kqv = vmla.Mulmat(ctx, kqv)
@@ -1906,16 +1939,18 @@ func turboQuantAttentionScores(ctx ml.Context, query, key ml.Tensor) ml.Tensor {
 
 	kqData := make([]float32, cachedSize*seqLenQ*numHeads)
 
-	// Each head writes to a disjoint region of kqData so goroutines are
-	// data-race-free without any locking.
-	var wg sync.WaitGroup
-	for head := 0; head < numHeads; head++ {
-		wg.Add(1)
-		go func(head int) {
-			defer wg.Done()
+	// Dispatch to CUDA when the kernel is compiled in, a device is accessible,
+	// and the context is large enough to amortise H2D/D2H transfer overhead.
+	// Below the threshold the CPU SIMD kernel is faster due to PCIe latency.
+	useCUDA := cudaAvailable() && cachedSize >= turboQuantCUDAThreshold
+
+	if useCUDA {
+		// Serial CUDA execution: cudaMu inside scoreTurboQuantCellsCUDA
+		// serialises on the device anyway, so sequential goroutine launches
+		// would not add parallelism. Avoid goroutine overhead entirely.
+		for head := 0; head < numHeads; head++ {
 			kvHead := head / groupSize
 			for q := 0; q < seqLenQ; q++ {
-				// Rotate the query once per (head, q) and reuse for all cached keys.
 				queryVector := make([]float32, headDim)
 				for d := 0; d < headDim; d++ {
 					queryVector[d] = queryFloats[d+headDim*q+headDim*seqLenQ*head]
@@ -1925,11 +1960,34 @@ func turboQuantAttentionScores(ctx ml.Context, query, key ml.Tensor) ml.Tensor {
 				queryNorm := turboquant.QueryNorm(queryRotated)
 
 				base := cachedSize*q + cachedSize*seqLenQ*head
-				scoreTurboQuantCells(queryRotated, queryNorm, dequantFlat, corrFlat, residNorms, encodedDim, cachedSize, kqData[base:])
+				scoreTurboQuantCellsCUDA(queryRotated, queryNorm, dequantFlat, corrFlat, residNorms, encodedDim, cachedSize, kqData[base:])
 			}
-		}(head)
+		}
+	} else {
+		// Each head writes to a disjoint region of kqData so goroutines are
+		// data-race-free without any locking.
+		var wg sync.WaitGroup
+		for head := 0; head < numHeads; head++ {
+			wg.Add(1)
+			go func(head int) {
+				defer wg.Done()
+				kvHead := head / groupSize
+				for q := 0; q < seqLenQ; q++ {
+					queryVector := make([]float32, headDim)
+					for d := 0; d < headDim; d++ {
+						queryVector[d] = queryFloats[d+headDim*q+headDim*seqLenQ*head]
+					}
+					expandedQuery := queryVectorForKVHead(queryVector, kvHead, kvHeads)
+					queryRotated := turboquant.ApplyRotation(expandedQuery, rotation)
+					queryNorm := turboquant.QueryNorm(queryRotated)
+
+					base := cachedSize*q + cachedSize*seqLenQ*head
+					scoreTurboQuantCells(queryRotated, queryNorm, dequantFlat, corrFlat, residNorms, encodedDim, cachedSize, kqData[base:])
+				}
+			}(head)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 
 	return ctx.Input().FromFloats(kqData, cachedSize, seqLenQ, numHeads)
 }

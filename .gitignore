@@ -15,3 +15,10 @@ __debug_bin*
 llama/build
 llama/vendor
 /ollama
+
+# TurboQuant CUDA build artifacts
+ml/backend/ggml/libturboquant_cuda.a
+ml/backend/ggml/turboquant_kernel_cuda.o
+
+# benchppl binary
+/benchppl
