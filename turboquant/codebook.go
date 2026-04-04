@@ -41,7 +41,7 @@ func buildLloydMaxCodebook(dim int, bits int) []float32 {
 		return []float32{0}
 	}
 
-	samples := standardNormalSamples(dim, bits, 8192)
+	samples := standardNormalSamples(dim, bits, 65536)
 	slices.Sort(samples)
 
 	centroids := make([]float64, levels)
@@ -129,14 +129,6 @@ func codebookBoundaries(codebook []float32) []float32 {
 	return out
 }
 
-// explicitCodebook is retained as a compatibility shim for local audit tooling.
-// The paper path uses deterministic Lloyd-Max scalar codebooks rather than the
-// previous hand-shaped exponent tables.
-func explicitCodebook(bits int, _ float64) []float32 {
-	codebook, _ := scalarCodebook(0, bits)
-	return codebook
-}
-
 func quantizeScalarByBoundary(v float32, codebook []float32, boundaries []float32) uint8 {
 	if len(codebook) == 0 {
 		return 0
@@ -180,51 +172,3 @@ func dequantizeScalar(idx uint8, codebook []float32) float32 {
 	return codebook[idx]
 }
 
-func regularCodebook(preset Preset) []float32 {
-	return preset.RegularCodebook
-}
-
-func regularBoundaries(preset Preset) []float32 {
-	return preset.RegularBoundaries
-}
-
-func outlierCodebook(preset Preset) []float32 {
-	return preset.OutlierCodebook
-}
-
-func outlierBoundaries(preset Preset) []float32 {
-	return preset.OutlierBoundaries
-}
-
-func selectOutliers(values []float32, k int) []int {
-	type score struct {
-		idx int
-		val float32
-	}
-	if k <= 0 {
-		return nil
-	}
-	scores := make([]score, len(values))
-	for i, value := range values {
-		scores[i] = score{idx: i, val: abs32(value)}
-	}
-	slices.SortFunc(scores, func(a, b score) int {
-		switch {
-		case a.val > b.val:
-			return -1
-		case a.val < b.val:
-			return 1
-		default:
-			return a.idx - b.idx
-		}
-	})
-	if k > len(scores) {
-		k = len(scores)
-	}
-	out := make([]int, k)
-	for i := 0; i < k; i++ {
-		out[i] = scores[i].idx
-	}
-	slices.Sort(out)
-	return out
-}

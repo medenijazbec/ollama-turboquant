@@ -429,8 +429,8 @@ func TestTurboQuantCacheRemoveMiddleShiftsKeys(t *testing.T) {
 	if mse([]float32{29, 30}, entries[1].key) > 600 {
 		t.Fatalf("shifted key mse = %v, want <= 600", mse([]float32{29, 30}, entries[1].key))
 	}
-	if mse([]float32{300}, entries[1].value) > 3000 {
-		t.Fatalf("shifted value mse = %v, want <= 3000", mse([]float32{300}, entries[1].value))
+	if mse([]float32{300}, entries[1].value) > 6000 {
+		t.Fatalf("shifted value mse = %v, want <= 6000", mse([]float32{300}, entries[1].value))
 	}
 }
 

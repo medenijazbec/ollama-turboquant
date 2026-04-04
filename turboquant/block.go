@@ -16,15 +16,12 @@ type Block struct {
 	PaddedDim      uint16
 	BlockDim       uint16
 	RegularBits    uint8
-	OutlierBits    uint8
 	RotationSeed   uint64
 	CodebookID     uint16
 	QJLRows        uint16
 	AuxLayoutID    uint8
 	Scale          float32
-	OutlierMask    []byte
 	RegularIndices []byte
-	OutlierIndices []byte
 	Residual       ResidualSketch
 }
 
@@ -39,15 +36,12 @@ func (b Block) MarshalBinary() ([]byte, error) {
 		b.PaddedDim,
 		b.BlockDim,
 		b.RegularBits,
-		b.OutlierBits,
 		b.RotationSeed,
 		b.CodebookID,
 		b.QJLRows,
 		b.AuxLayoutID,
 		b.Scale,
-		uint32(len(b.OutlierMask)),
 		uint32(len(b.RegularIndices)),
-		uint32(len(b.OutlierIndices)),
 		b.Residual.Seed,
 		b.Residual.Scale,
 		b.Residual.SketchDim,
@@ -58,16 +52,14 @@ func (b Block) MarshalBinary() ([]byte, error) {
 			return nil, err
 		}
 	}
-	buf.Write(b.OutlierMask)
 	buf.Write(b.RegularIndices)
-	buf.Write(b.OutlierIndices)
 	buf.Write(b.Residual.Signs)
 	return buf.Bytes(), nil
 }
 
 func (b *Block) UnmarshalBinary(data []byte) error {
 	r := bytes.NewReader(data)
-	var outlierMaskLen, regularLen, outlierLen, residualLen uint32
+	var regularLen, residualLen uint32
 	fields := []any{
 		&b.Version,
 		&b.PresetID,
@@ -77,15 +69,12 @@ func (b *Block) UnmarshalBinary(data []byte) error {
 		&b.PaddedDim,
 		&b.BlockDim,
 		&b.RegularBits,
-		&b.OutlierBits,
 		&b.RotationSeed,
 		&b.CodebookID,
 		&b.QJLRows,
 		&b.AuxLayoutID,
 		&b.Scale,
-		&outlierMaskLen,
 		&regularLen,
-		&outlierLen,
 		&b.Residual.Seed,
 		&b.Residual.Scale,
 		&b.Residual.SketchDim,
@@ -106,11 +95,9 @@ func (b *Block) UnmarshalBinary(data []byte) error {
 		return fmt.Errorf("invalid block dims: original=%d padded=%d block=%d", b.OriginalDim, b.PaddedDim, b.BlockDim)
 	}
 
-	b.OutlierMask = make([]byte, outlierMaskLen)
 	b.RegularIndices = make([]byte, regularLen)
-	b.OutlierIndices = make([]byte, outlierLen)
 	b.Residual.Signs = make([]byte, residualLen)
-	for _, dst := range [][]byte{b.OutlierMask, b.RegularIndices, b.OutlierIndices, b.Residual.Signs} {
+	for _, dst := range [][]byte{b.RegularIndices, b.Residual.Signs} {
 		if _, err := io.ReadFull(r, dst); err != nil {
 			return err
 		}

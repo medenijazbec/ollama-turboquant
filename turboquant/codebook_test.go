@@ -52,10 +52,3 @@ func TestQuantizeScalarByBoundaryDeterministic(t *testing.T) {
 	}
 }
 
-func TestSelectOutliersStableOnTies(t *testing.T) {
-	values := []float32{4, -4, 4, 1, -1}
-	got := selectOutliers(values, 2)
-	if len(got) != 2 || got[0] != 0 || got[1] != 1 {
-		t.Fatalf("selectOutliers = %v, want [0 1]", got)
-	}
-}

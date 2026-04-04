@@ -110,6 +110,32 @@ func residualDotCorrection(queryRot []float32, sketch ResidualSketch) float32 {
 	return correction
 }
 
+// PrecomputeCorrectionVec builds the vector w = (√π/2 · residualNorm / sketchDim) · Σ_j sign_j · G_j,
+// where G_j is row j of the random Gaussian projection matrix and sign_j is the stored QJL sign bit.
+// Scoring then reduces to dot(queryRotated, w), replacing the per-query O(dim²) Gaussian projection
+// loop with a single O(dim) dot product.
+//
+// The returned slice has length dim and is nil when the sketch carries no correction (Scale==0).
+func PrecomputeCorrectionVec(sketch ResidualSketch, dim int) []float32 {
+	if sketch.SketchDim == 0 || sketch.Scale == 0 {
+		return nil
+	}
+	out := make([]float32, dim)
+	signBits := unpackBits(sketch.Signs, 1, int(sketch.SketchDim))
+	scale := float32(qjlUnbiasScale) * sketch.Scale / float32(sketch.SketchDim)
+	for row, bit := range signBits {
+		sign := float32(-1)
+		if bit == 1 {
+			sign = 1
+		}
+		sv := sign * scale
+		for col := 0; col < dim; col++ {
+			out[col] += sv * gaussianProjectionEntry(sketch.Seed, row, col)
+		}
+	}
+	return out
+}
+
 func gaussianProjectionDot(values []float32, seed uint64, row int) float32 {
 	var out float32
 	for col, value := range values {
