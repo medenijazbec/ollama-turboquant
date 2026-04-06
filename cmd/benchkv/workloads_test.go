@@ -113,10 +113,71 @@ func TestBuildLargeContextCells(t *testing.T) {
 		MinFitDecode:   32,
 	}
 	cells := buildStandardCells(cfg)
-	if len(cells) != 6 {
-		t.Fatalf("cell count = %d, want 6", len(cells))
+	if len(cells) != 12 {
+		t.Fatalf("cell count = %d, want 12", len(cells))
 	}
 	if cells[0].Workload.NumCtx != 1000000 {
 		t.Fatalf("first large-context cell num_ctx = %d, want 1000000", cells[0].Workload.NumCtx)
+	}
+	tails := map[int]bool{}
+	for _, cell := range cells {
+		tails[cell.ResidualTailTokens] = true
+	}
+	if !tails[0] || !tails[128] || len(tails) != 2 {
+		t.Fatalf("expected paired residual-tail expansion, got %#v", tails)
+	}
+}
+
+func TestBuildLargeContextCellsHonorsExplicitResidualTailOverride(t *testing.T) {
+	cfg := config{
+		Profile:            "large-context",
+		Hosts:              []hostTarget{{Label: "turbo"}},
+		KVModes:            []string{"tq35"},
+		Workloads:          []workloadName{workloadFitCeiling},
+		StretchContext:     1000000,
+		MinFitDecode:       32,
+		ResidualTailTokens: 64,
+	}
+
+	cells := buildStandardCells(cfg)
+	if len(cells) != 1 {
+		t.Fatalf("cell count = %d, want 1", len(cells))
+	}
+	if cells[0].ResidualTailTokens != 64 {
+		t.Fatalf("ResidualTailTokens = %d, want 64", cells[0].ResidualTailTokens)
+	}
+}
+
+func TestBuildLargeContextCellsExpandsQJLSweepModes(t *testing.T) {
+	cfg := config{
+		Profile:        "large-context",
+		Hosts:          []hostTarget{{Label: "turbo"}},
+		KVModes:        []string{"tq35"},
+		Workloads:      []workloadName{workloadFitCeiling},
+		StretchContext: 1000000,
+		MinFitDecode:   32,
+		QJLKModes:      []bool{false, true},
+		QJLVModes:      []bool{false},
+	}
+
+	cells := buildStandardCells(cfg)
+	if len(cells) != 4 {
+		t.Fatalf("cell count = %d, want 4", len(cells))
+	}
+
+	var sawQJLKOff bool
+	var sawQJLKOn bool
+	for _, cell := range cells {
+		if cell.QJLVRequested {
+			t.Fatalf("expected qjl-v to remain false in generated cells, got %#v", cell)
+		}
+		if cell.QJLKRequested {
+			sawQJLKOn = true
+		} else {
+			sawQJLKOff = true
+		}
+	}
+	if !sawQJLKOff || !sawQJLKOn {
+		t.Fatalf("expected both qjl-k sweep states, off=%t on=%t", sawQJLKOff, sawQJLKOn)
 	}
 }

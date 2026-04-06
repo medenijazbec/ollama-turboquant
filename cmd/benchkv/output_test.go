@@ -39,6 +39,12 @@ func TestWriteCSV(t *testing.T) {
 	if !strings.Contains(string(data), "detected_head_dim,architecture_class,support_tier,hybrid_kv_architecture") {
 		t.Fatal("expected support-matrix columns in csv header")
 	}
+	if !strings.Contains(string(data), "attention_surface_policy_requested,attention_surface_policy_effective,attention_surface_policy,attention_surface_behavior") {
+		t.Fatal("expected surface policy columns in csv header")
+	}
+	if !strings.Contains(string(data), "qjl_k_requested,qjl_k_effective,qjl_v_requested,qjl_v_effective") {
+		t.Fatal("expected qjl requested/effective columns in csv header")
+	}
 	if !strings.Contains(string(data), "gpu_stats_source,host_stats_source,validation_kind,validation_status") {
 		t.Fatal("expected telemetry/validation columns in csv header")
 	}

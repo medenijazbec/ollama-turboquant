@@ -173,6 +173,57 @@ func TestDetectCorruptionMarkersFlagsDegenerateOutput(t *testing.T) {
 	}
 }
 
+func TestRunAgenticStructuredValidationUsesSemanticCheck(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"message": map[string]any{"role": "assistant", "content": `{"winner":"weather_a","confidence":0.82,"conflict":true}`},
+			"done":    true,
+		})
+	}))
+	defer server.Close()
+
+	parsed, _ := url.Parse(server.URL)
+	cfg := config{Model: "m", ToolSuite: "default"}
+	cell := sweepCell{
+		Host:     hostTarget{BaseURL: server.URL, Label: "turbo", URL: parsed, Client: api.NewClient(parsed, server.Client()), KVSupportMode: hostKVSupportRequest},
+		KVMode:   "tq35",
+		Workload: workloadSpec{Name: workloadAgenticStructured, NumCtx: 8192, MaxTokens: 256},
+	}
+	got := runAgenticStructuredValidation(cfg, cell)
+	if got.Status != validationPassed {
+		t.Fatalf("expected semantic agentic validation to pass, got %+v", got)
+	}
+}
+
+func TestRunNIAHRetrievalValidationPasses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_ = json.NewEncoder(w).Encode(map[string]any{"response": "NIAH-NEEDLE-314159", "done": true})
+	}))
+	defer server.Close()
+
+	parsed, _ := url.Parse(server.URL)
+	cfg := config{Model: "m"}
+	cell := sweepCell{
+		Host:     hostTarget{BaseURL: server.URL, Label: "turbo", URL: parsed, Client: api.NewClient(parsed, server.Client()), KVSupportMode: hostKVSupportRequest},
+		KVMode:   "tq35",
+		Workload: workloadSpec{Name: workloadNIAHRetrieval, NumCtx: 16384, MaxTokens: 32},
+	}
+	got := runNIAHRetrievalValidation(cfg, cell)
+	if got.Status != validationPassed || !got.NIAHPass || got.NIAHDepth <= 0 {
+		t.Fatalf("expected NIAH retrieval to pass, got %+v", got)
+	}
+}
+
 func TestLongJSONRetentionRemainsScaffolded(t *testing.T) {
 	got := runValidation(config{}, sweepCell{}, workerResult{Workload: string(workloadLongJSONRetention), WorkerIndex: 0})
 	if got.Kind != validationLongJSONRetention || got.Status != validationScaffolded {

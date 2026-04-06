@@ -52,6 +52,20 @@ func applyFlashAttentionOption(options map[string]any, requested bool) {
 	options["flash_attention"] = requested
 }
 
+func applyExperimentalTurboQuantOptions(options map[string]any, cfg config, cell sweepCell) {
+	if cell.QJLKRequested {
+		options["turboquant_qjl_k"] = true
+	}
+	if cell.QJLVRequested {
+		options["turboquant_qjl_v"] = true
+	}
+	if cell.ResidualTailTokens > 0 {
+		options["turboquant_residual_tail_tokens"] = cell.ResidualTailTokens
+	} else if cfg.ResidualTailTokens > 0 {
+		options["turboquant_residual_tail_tokens"] = cfg.ResidualTailTokens
+	}
+}
+
 func legacyKVUnsupportedError(kvMode string) string {
 	return "unsupported kv_cache_type on target host"
 }

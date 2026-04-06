@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -24,6 +26,7 @@ const (
 	validationPromptFileRegression  validationKind = "prompt-file-regression"
 	validationDecodeCorruptionGuard validationKind = "decode-corruption-guard"
 	validationFitCeiling            validationKind = "fit-ceiling"
+	validationNIAHRetrieval         validationKind = "niah-retrieval"
 
 	validationPassed     validationStatus = "passed"
 	validationFailed     validationStatus = "failed"
@@ -32,11 +35,16 @@ const (
 )
 
 type validationResult struct {
-	Kind     validationKind
-	Status   validationStatus
-	Expected string
-	Observed string
-	Error    string
+	Kind               validationKind
+	Status             validationStatus
+	Expected           string
+	Observed           string
+	Error              string
+	CorruptionClass    string
+	EmptyOutput        bool
+	TruncationDetected bool
+	NIAHDepth          int
+	NIAHPass           bool
 }
 
 // Implemented benchmark-visible correctness hooks so path diagnostics are not judged on token speed alone; idea source: @TheTom.
@@ -50,6 +58,8 @@ func runValidation(cfg config, cell sweepCell, row workerResult) validationResul
 		return runRecallDistanceValidation(cfg, cell)
 	case workloadLongContextRecall:
 		return runLongContextRecallValidation(cfg, cell)
+	case workloadNIAHRetrieval:
+		return runNIAHRetrievalValidation(cfg, cell)
 	case workloadPromptFileRegress:
 		return runPromptFileRegressionValidation(cfg, cell)
 	case workloadDecodeCorruption:
@@ -70,6 +80,12 @@ func runValidation(cfg config, cell sweepCell, row workerResult) validationResul
 		// Implemented explicit validation result states so corruption-sensitive failures are not conflated with throughput success; idea source: @sjoerdmaessen.
 		return validationResult{Kind: validationPerplexity, Status: validationScaffolded, Error: "perplexity harness scaffolded; no concrete implementation yet"}
 	}
+}
+
+type agenticStructuredResult struct {
+	Winner     string  `json:"winner"`
+	Confidence float64 `json:"confidence"`
+	Conflict   bool    `json:"conflict"`
 }
 
 func runLongContextRecallValidation(cfg config, cell sweepCell) validationResult {
@@ -125,18 +141,24 @@ func runDecodeCorruptionValidation(cfg config, cell sweepCell) validationResult 
 	if err != nil {
 		return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationFailed, Expected: "valid JSON answer with checksum 12345", Observed: observed, Error: err.Error()}
 	}
-	markers := detectCorruptionMarkers(observed)
+	markers, corruptionClass, emptyOutput, truncationDetected := classifyCorruption(observed)
 	for attempt := 1; attempt < cfg.Repeats; attempt++ {
 		repeatObserved, repeatErr := runValidationGenerate(cfg, cell, buildDecodeCorruptionPrompt(max(cell.Workload.PromptTokensTarget, 1024)), max(cell.Workload.MaxTokens, 2048))
 		if repeatErr != nil {
 			return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationFailed, Expected: "valid JSON answer with checksum 12345", Observed: repeatObserved, Error: repeatErr.Error()}
 		}
-		markers = append(markers, detectCorruptionMarkers(repeatObserved)...)
+		repeatMarkers, repeatClass, repeatEmpty, repeatTrunc := classifyCorruption(repeatObserved)
+		markers = append(markers, repeatMarkers...)
+		if corruptionClass == "" {
+			corruptionClass = repeatClass
+		}
+		emptyOutput = emptyOutput || repeatEmpty
+		truncationDetected = truncationDetected || repeatTrunc
 	}
 	if len(markers) == 0 && strings.Contains(observed, "12345") {
 		return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationPassed, Expected: "valid JSON answer with checksum 12345", Observed: observed}
 	}
-	return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationFailed, Expected: "valid JSON answer with checksum 12345", Observed: observed, Error: strings.Join(markers, ",")}
+	return validationResult{Kind: validationDecodeCorruptionGuard, Status: validationFailed, Expected: "valid JSON answer with checksum 12345", Observed: observed, Error: strings.Join(markers, ","), CorruptionClass: corruptionClass, EmptyOutput: emptyOutput, TruncationDetected: truncationDetected}
 }
 
 func runAgenticStructuredValidation(cfg config, cell sweepCell) validationResult {
@@ -147,12 +169,13 @@ func runAgenticStructuredValidation(cfg config, cell sweepCell) validationResult
 		return validationResult{Kind: validationStructuredOutput, Status: validationSkipped, Error: disposition.Error}
 	}
 	applyFlashAttentionOption(options, cell.FARequested)
+	applyExperimentalTurboQuantOptions(options, cfg, cell)
 
 	req := &api.ChatRequest{
 		Model:     cfg.Model,
 		Stream:    &stream,
 		KeepAlive: &keepAlive,
-		Format: []byte(`{"type":"object","properties":{"winner":{"type":"string"},"confidence":{"type":"number"},"conflict":{"type":"boolean"}},"required":["winner","confidence","conflict"]}`),
+		Format:    []byte(`{"type":"object","properties":{"winner":{"type":"string"},"confidence":{"type":"number"},"conflict":{"type":"boolean"}},"required":["winner","confidence","conflict"]}`),
 		Messages: []api.Message{
 			{Role: "user", Content: buildAgenticStructuredPrompt(cfg.ToolSuite)},
 		},
@@ -172,14 +195,21 @@ func runAgenticStructuredValidation(cfg config, cell sweepCell) validationResult
 		finalErr = err
 	}
 	if finalErr != nil {
-		return validationResult{Kind: validationStructuredOutput, Status: validationFailed, Expected: `{"winner":"alpha","confidence":0.82,"conflict":true}`, Observed: observed.String(), Error: finalErr.Error()}
+		return validationResult{Kind: validationStructuredOutput, Status: validationFailed, Expected: `{"winner":"weather_a","confidence":0.82,"conflict":true}`, Observed: observed.String(), Error: finalErr.Error()}
 	}
-	markers := detectCorruptionMarkers(observed.String())
-	normalized := normalizeValidationText(observed.String())
-	if len(markers) == 0 && strings.Contains(normalized, `"winner":"alpha"`) && strings.Contains(normalized, `"conflict":true`) {
-		return validationResult{Kind: validationStructuredOutput, Status: validationPassed, Expected: `{"winner":"alpha","confidence":0.82,"conflict":true}`, Observed: observed.String()}
+	markers, corruptionClass, emptyOutput, truncationDetected := classifyCorruption(observed.String())
+	var parsed agenticStructuredResult
+	if len(markers) == 0 && json.Unmarshal([]byte(observed.String()), &parsed) == nil {
+		confidenceOK := math.Abs(parsed.Confidence-0.82) <= 0.02
+		winnerOK := parsed.Winner == "weather_a" || parsed.Winner == "alpha"
+		if winnerOK && parsed.Conflict && confidenceOK {
+			return validationResult{Kind: validationStructuredOutput, Status: validationPassed, Expected: `{"winner":"weather_a","confidence":0.82,"conflict":true}`, Observed: observed.String()}
+		}
 	}
-	return validationResult{Kind: validationStructuredOutput, Status: validationFailed, Expected: `{"winner":"alpha","confidence":0.82,"conflict":true}`, Observed: observed.String(), Error: strings.Join(markers, ",")}
+	if len(markers) == 0 {
+		markers = append(markers, "semantic-validator mismatch")
+	}
+	return validationResult{Kind: validationStructuredOutput, Status: validationFailed, Expected: `{"winner":"weather_a","confidence":0.82,"conflict":true}`, Observed: observed.String(), Error: strings.Join(markers, ","), CorruptionClass: corruptionClass, EmptyOutput: emptyOutput, TruncationDetected: truncationDetected}
 }
 
 func runValidationGenerate(cfg config, cell sweepCell, prompt string, maxTokens int) (string, error) {
@@ -189,6 +219,7 @@ func runValidationGenerate(cfg config, cell sweepCell, prompt string, maxTokens 
 	if !disposition.Supported {
 		return "", errors.New(disposition.Error)
 	}
+	applyExperimentalTurboQuantOptions(options, cfg, cell)
 
 	req := &api.GenerateRequest{
 		Model:     cfg.Model,
@@ -211,30 +242,71 @@ func runValidationGenerate(cfg config, cell sweepCell, prompt string, maxTokens 
 }
 
 func detectCorruptionMarkers(observed string) []string {
+	markers, _, _, _ := classifyCorruption(observed)
+	return markers
+}
+
+func classifyCorruption(observed string) ([]string, string, bool, bool) {
 	lower := strings.ToLower(observed)
 	var markers []string
+	corruptionClass := ""
+	emptyOutput := false
+	truncationDetected := false
 	if strings.TrimSpace(observed) == "" {
 		markers = append(markers, "empty-output")
+		corruptionClass = "empty_output"
+		emptyOutput = true
 	}
 	if !utf8.ValidString(observed) {
 		markers = append(markers, "invalid-utf8")
+		if corruptionClass == "" {
+			corruptionClass = "invalid_utf8"
+		}
 	}
 	if strings.Contains(lower, "////") || strings.Contains(lower, "????") {
 		markers = append(markers, "slash-question repetition")
+		if corruptionClass == "" {
+			corruptionClass = "punctuation_repetition"
+		}
 	}
 	if strings.Contains(lower, "!!!!!") {
 		markers = append(markers, "bang repetition")
+		if corruptionClass == "" {
+			corruptionClass = "punctuation_repetition"
+		}
 	}
 	if strings.Count(lower, "{") != strings.Count(lower, "}") {
 		markers = append(markers, "malformed-json-braces")
+		if corruptionClass == "" {
+			corruptionClass = "malformed_json"
+		}
 	}
 	if strings.Contains(lower, `""""`) || strings.Contains(lower, `,,,,`) {
 		markers = append(markers, "degenerate repetition")
+		if corruptionClass == "" {
+			corruptionClass = "degenerate_small_alphabet"
+		}
 	}
 	if repeatedTokenRun(lower, 12) {
 		markers = append(markers, "repeated-token run")
+		if corruptionClass == "" {
+			corruptionClass = "degenerate_small_alphabet"
+		}
 	}
-	return markers
+	if strings.HasSuffix(strings.TrimSpace(observed), "{") || strings.HasSuffix(strings.TrimSpace(observed), "[") || strings.HasSuffix(strings.TrimSpace(observed), ",") {
+		markers = append(markers, "truncation-detected")
+		truncationDetected = true
+		if corruptionClass == "" {
+			corruptionClass = "truncation_detected"
+		}
+	}
+	if len(markers) == 0 && len(observed) > 0 && strings.Count(lower, "\n") > 40 {
+		markers = append(markers, "verbose-runaway")
+		if corruptionClass == "" {
+			corruptionClass = "verbose_runaway"
+		}
+	}
+	return markers, corruptionClass, emptyOutput, truncationDetected
 }
 
 func repeatedTokenRun(text string, threshold int) bool {
@@ -265,6 +337,7 @@ func runRecallDistanceValidation(cfg config, cell sweepCell) validationResult {
 	if !disposition.Supported {
 		return validationResult{Kind: validationRecallDistance, Status: validationSkipped, Error: disposition.Error}
 	}
+	applyExperimentalTurboQuantOptions(options, cfg, cell)
 
 	req := &api.GenerateRequest{
 		Model:     cfg.Model,
@@ -306,7 +379,7 @@ func buildRecallDistancePrompt(needle string) string {
 }
 
 func buildAgenticStructuredPrompt(toolSuite string) string {
-	return "You are reconciling mock tool outputs. Tool weather_a says alpha with confidence 0.82. Tool weather_b says beta with confidence 0.41. The tools disagree, so conflict is true. Return strict JSON with winner, confidence, and conflict only. Tool suite: " + firstNonEmpty(toolSuite, "default")
+	return "You are reconciling mock tool outputs. Tool weather_a is the winning tool with confidence 0.82. Tool weather_b reports a lower-confidence alternative at 0.41. The tools disagree, so conflict is true. Return strict JSON with winner, confidence, and conflict only. winner must be the winning tool label. Tool suite: " + firstNonEmpty(toolSuite, "default")
 }
 
 func normalizeValidationText(value string) string {
@@ -314,8 +387,48 @@ func normalizeValidationText(value string) string {
 }
 
 func minValidationTimeout(runTimeout time.Duration) time.Duration {
-	if runTimeout <= 0 || runTimeout > 30*time.Second {
-		return 30 * time.Second
+	if runTimeout <= 0 {
+		return 90 * time.Second
 	}
-	return runTimeout
+	derived := maxDuration(30*time.Second, runTimeout/4)
+	if derived > runTimeout {
+		return runTimeout
+	}
+	return derived
+}
+
+func runNIAHRetrievalValidation(cfg config, cell sweepCell) validationResult {
+	depth := niahDepthForContext(cell.Workload.NumCtx)
+	needle := "NIAH-NEEDLE-314159"
+	prompt := buildNIAHPrompt(needle, depth)
+	observed, err := runValidationGenerate(cfg, cell, prompt, 24)
+	if err != nil {
+		return validationResult{Kind: validationNIAHRetrieval, Status: validationFailed, Expected: needle, Observed: observed, Error: err.Error(), NIAHDepth: depth}
+	}
+	pass := strings.Contains(normalizeValidationText(observed), normalizeValidationText(needle))
+	if pass {
+		return validationResult{Kind: validationNIAHRetrieval, Status: validationPassed, Expected: needle, Observed: observed, NIAHDepth: depth, NIAHPass: true}
+	}
+	return validationResult{Kind: validationNIAHRetrieval, Status: validationFailed, Expected: needle, Observed: observed, Error: "needle was not retrieved exactly", NIAHDepth: depth, NIAHPass: false}
+}
+
+func niahDepthForContext(numCtx int) int {
+	for _, depth := range []int{32768, 16384, 8192, 2048, 512} {
+		if numCtx >= depth+512 {
+			return depth
+		}
+	}
+	return 512
+}
+
+func buildNIAHPrompt(needle string, depth int) string {
+	filler := strings.Repeat("hay ", max(1, depth/4))
+	return "Read the full context carefully. There is exactly one secret needle. Return the needle only.\n" + filler + "\nNEEDLE: " + needle + "\n" + filler
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }

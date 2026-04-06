@@ -23,6 +23,9 @@ type gpuSample struct {
 	totalVisibleVRAMBytes *int64
 	perGPUUsedBytes       map[string]int64
 	perGPUFreeBytes       map[string]int64
+	perGPUUtilPercent     map[string]float64
+	perGPUTempC           map[string]float64
+	perGPUPowerW          map[string]float64
 	visibleGPUCount       int
 }
 
@@ -45,6 +48,10 @@ type gpuMonitor struct {
 	hasTotalVisibleVRAM bool
 	perGPUUsed          map[string]int64
 	perGPUFree          map[string]int64
+	peakPerGPUUsed      map[string]int64
+	perGPUUtilPercent   map[string]float64
+	perGPUTempC         map[string]float64
+	perGPUPowerW        map[string]float64
 	visibleGPUCount     int
 	samples             int
 }
@@ -131,9 +138,13 @@ func (m *gpuMonitor) poll() {
 		if m.perGPUUsed == nil {
 			m.perGPUUsed = make(map[string]int64, len(sample.perGPUUsedBytes))
 		}
+		if m.peakPerGPUUsed == nil {
+			m.peakPerGPUUsed = make(map[string]int64, len(sample.perGPUUsedBytes))
+		}
 		for key, value := range sample.perGPUUsedBytes {
-			if value > m.perGPUUsed[key] {
-				m.perGPUUsed[key] = value
+			m.perGPUUsed[key] = value
+			if value > m.peakPerGPUUsed[key] {
+				m.peakPerGPUUsed[key] = value
 			}
 		}
 	}
@@ -143,6 +154,30 @@ func (m *gpuMonitor) poll() {
 		}
 		for key, value := range sample.perGPUFreeBytes {
 			m.perGPUFree[key] = value
+		}
+	}
+	if len(sample.perGPUUtilPercent) > 0 {
+		if m.perGPUUtilPercent == nil {
+			m.perGPUUtilPercent = make(map[string]float64, len(sample.perGPUUtilPercent))
+		}
+		for key, value := range sample.perGPUUtilPercent {
+			m.perGPUUtilPercent[key] = value
+		}
+	}
+	if len(sample.perGPUTempC) > 0 {
+		if m.perGPUTempC == nil {
+			m.perGPUTempC = make(map[string]float64, len(sample.perGPUTempC))
+		}
+		for key, value := range sample.perGPUTempC {
+			m.perGPUTempC[key] = value
+		}
+	}
+	if len(sample.perGPUPowerW) > 0 {
+		if m.perGPUPowerW == nil {
+			m.perGPUPowerW = make(map[string]float64, len(sample.perGPUPowerW))
+		}
+		for key, value := range sample.perGPUPowerW {
+			m.perGPUPowerW[key] = value
 		}
 	}
 	if sample.visibleGPUCount > m.visibleGPUCount {
@@ -159,14 +194,14 @@ func (m *gpuMonitor) stats() gpuStats {
 	}
 
 	stats := gpuStats{
-		Available:       true,
-		Source:          firstNonEmpty(m.source, "unavailable"),
-		PeakVRAMBytes:   int64Ptr(m.peakVRAM),
+		Available:        true,
+		Source:           firstNonEmpty(m.source, "unavailable"),
+		PeakVRAMBytes:    int64Ptr(m.peakVRAM),
 		CurrentVRAMBytes: int64Ptr(m.peakVRAM),
-		AvgGPUUtil:      float64Ptr(m.sumMeanUtil / float64(m.samples)),
-		PeakGPUUtil:     float64Ptr(m.peakMeanUtil),
-		VisibleGPUCount: m.visibleGPUCount,
-		SampleCount:     m.samples,
+		AvgGPUUtil:       float64Ptr(m.sumMeanUtil / float64(m.samples)),
+		PeakGPUUtil:      float64Ptr(m.peakMeanUtil),
+		VisibleGPUCount:  m.visibleGPUCount,
+		SampleCount:      m.samples,
 	}
 	if m.hasProcessVRAM {
 		stats.ProcessVRAMBytes = int64Ptr(m.processVRAM)
@@ -180,13 +215,25 @@ func (m *gpuMonitor) stats() gpuStats {
 	if len(m.perGPUFree) > 0 {
 		stats.PerGPUFreeBytes = maps.Clone(m.perGPUFree)
 	}
+	if len(m.peakPerGPUUsed) > 0 {
+		stats.PeakPerGPUUsedBytes = maps.Clone(m.peakPerGPUUsed)
+	}
+	if len(m.perGPUUtilPercent) > 0 {
+		stats.PerGPUUtilPercent = maps.Clone(m.perGPUUtilPercent)
+	}
+	if len(m.perGPUTempC) > 0 {
+		stats.PerGPUTempC = maps.Clone(m.perGPUTempC)
+	}
+	if len(m.perGPUPowerW) > 0 {
+		stats.PerGPUPowerW = maps.Clone(m.perGPUPowerW)
+	}
 	return stats
 }
 
 type smiPoller struct{}
 
 func newSMIPoller() (gpuPoller, bool) {
-	cmd := exec.Command("nvidia-smi", "--query-gpu=index,memory.used,memory.free,memory.total,utilization.gpu", "--format=csv,noheader,nounits")
+	cmd := exec.Command("nvidia-smi", "--query-gpu=index,memory.used,memory.free,memory.total,utilization.gpu,temperature.gpu,power.draw", "--format=csv,noheader,nounits")
 	if err := cmd.Run(); err != nil {
 		return nil, false
 	}
@@ -194,12 +241,12 @@ func newSMIPoller() (gpuPoller, bool) {
 }
 
 func (p *smiPoller) poll() (gpuSample, bool) {
-	cmd := exec.Command("nvidia-smi", "--query-gpu=index,memory.used,memory.free,memory.total,utilization.gpu", "--format=csv,noheader,nounits")
+	cmd := exec.Command("nvidia-smi", "--query-gpu=index,memory.used,memory.free,memory.total,utilization.gpu,temperature.gpu,power.draw", "--format=csv,noheader,nounits")
 	out, err := cmd.Output()
 	if err != nil {
 		return gpuSample{}, false
 	}
-	peakVRAM, meanUtil, totalVisible, perGPUUsed, perGPUFree, visibleCount, ok := parseNvidiaSMI(string(out))
+	peakVRAM, meanUtil, totalVisible, perGPUUsed, perGPUFree, perGPUUtil, perGPUTemp, perGPUPower, visibleCount, ok := parseNvidiaSMI(string(out))
 	if !ok {
 		return gpuSample{}, false
 	}
@@ -210,6 +257,9 @@ func (p *smiPoller) poll() (gpuSample, bool) {
 		totalVisibleVRAMBytes: totalVisible,
 		perGPUUsedBytes:       perGPUUsed,
 		perGPUFreeBytes:       perGPUFree,
+		perGPUUtilPercent:     perGPUUtil,
+		perGPUTempC:           perGPUTemp,
+		perGPUPowerW:          perGPUPower,
 		visibleGPUCount:       visibleCount,
 	}
 	if processVRAM, ok := queryProcessVRAMFromSMI(); ok {
@@ -222,10 +272,10 @@ func (p *smiPoller) close() {}
 
 func (p *smiPoller) source() string { return "nvidia-smi" }
 
-func parseNvidiaSMI(out string) (int64, float64, *int64, map[string]int64, map[string]int64, int, bool) {
+func parseNvidiaSMI(out string) (int64, float64, *int64, map[string]int64, map[string]int64, map[string]float64, map[string]float64, map[string]float64, int, bool) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
-		return 0, 0, nil, nil, nil, 0, false
+		return 0, 0, nil, nil, nil, nil, nil, nil, 0, false
 	}
 
 	var totalMemMiB int64
@@ -234,41 +284,55 @@ func parseNvidiaSMI(out string) (int64, float64, *int64, map[string]int64, map[s
 	var count int
 	perGPUUsed := make(map[string]int64)
 	perGPUFree := make(map[string]int64)
+	perGPUUtil := make(map[string]float64)
+	perGPUTemp := make(map[string]float64)
+	perGPUPower := make(map[string]float64)
 
 	for _, line := range lines {
 		parts := strings.Split(line, ",")
 		if len(parts) < 5 {
-			return 0, 0, nil, nil, nil, 0, false
+			return 0, 0, nil, nil, nil, nil, nil, nil, 0, false
 		}
 		index := strings.TrimSpace(parts[0])
 		memUsed, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
 		if err != nil {
-			return 0, 0, nil, nil, nil, 0, false
+			return 0, 0, nil, nil, nil, nil, nil, nil, 0, false
 		}
 		memFree, err := strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
 		if err != nil {
-			return 0, 0, nil, nil, nil, 0, false
+			return 0, 0, nil, nil, nil, nil, nil, nil, 0, false
 		}
 		memTotal, err := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
 		if err != nil {
-			return 0, 0, nil, nil, nil, 0, false
+			return 0, 0, nil, nil, nil, nil, nil, nil, 0, false
 		}
 		util, err := strconv.ParseFloat(strings.TrimSpace(parts[4]), 64)
 		if err != nil {
-			return 0, 0, nil, nil, nil, 0, false
+			return 0, 0, nil, nil, nil, nil, nil, nil, 0, false
+		}
+		temp := 0.0
+		if len(parts) > 5 {
+			temp, _ = strconv.ParseFloat(strings.TrimSpace(parts[5]), 64)
+		}
+		power := 0.0
+		if len(parts) > 6 {
+			power, _ = strconv.ParseFloat(strings.TrimSpace(parts[6]), 64)
 		}
 		totalMemMiB += memUsed
 		totalVisibleMiB += memTotal
 		totalUtil += util
 		perGPUUsed[index] = memUsed * 1024 * 1024
 		perGPUFree[index] = memFree * 1024 * 1024
+		perGPUUtil[index] = util
+		perGPUTemp[index] = temp
+		perGPUPower[index] = power
 		count++
 	}
 	if count == 0 {
-		return 0, 0, nil, nil, nil, 0, false
+		return 0, 0, nil, nil, nil, nil, nil, nil, 0, false
 	}
 	totalVisible := totalVisibleMiB * 1024 * 1024
-	return totalMemMiB * 1024 * 1024, totalUtil / float64(count), int64Ptr(totalVisible), perGPUUsed, perGPUFree, count, true
+	return totalMemMiB * 1024 * 1024, totalUtil / float64(count), int64Ptr(totalVisible), perGPUUsed, perGPUFree, perGPUUtil, perGPUTemp, perGPUPower, count, true
 }
 
 func queryProcessVRAMFromSMI() (int64, bool) {

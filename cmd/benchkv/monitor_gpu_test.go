@@ -3,8 +3,8 @@ package main
 import "testing"
 
 func TestParseNvidiaSMI(t *testing.T) {
-	out := "0, 1000, 2000, 3000, 50\n1, 2000, 4000, 6000, 70\n"
-	peakVRAM, meanUtil, totalVisible, perGPUUsed, perGPUFree, visibleCount, ok := parseNvidiaSMI(out)
+	out := "0, 1000, 2000, 3000, 50, 71, 180.5\n1, 2000, 4000, 6000, 70, 73, 190.0\n"
+	peakVRAM, meanUtil, totalVisible, perGPUUsed, perGPUFree, perGPUUtil, perGPUTemp, perGPUPower, visibleCount, ok := parseNvidiaSMI(out)
 	if !ok {
 		t.Fatal("expected parse to succeed")
 	}
@@ -22,6 +22,9 @@ func TestParseNvidiaSMI(t *testing.T) {
 	}
 	if perGPUUsed["0"] != int64(1000*1024*1024) || perGPUFree["1"] != int64(4000*1024*1024) {
 		t.Fatalf("unexpected per-GPU maps: used=%v free=%v", perGPUUsed, perGPUFree)
+	}
+	if perGPUUtil["1"] != 70 || perGPUTemp["0"] != 71 || perGPUPower["1"] != 190 {
+		t.Fatalf("unexpected telemetry maps: util=%v temp=%v power=%v", perGPUUtil, perGPUTemp, perGPUPower)
 	}
 }
 

@@ -51,11 +51,14 @@ type rawFlags struct {
 	longJSONBytes       *int
 	turboMode           *string
 	faModes             *string
+	qjlKModes           *string
+	qjlVModes           *string
 	repeats             *int
 	recallDistances     *string
 	toolSuite           *string
 	modelFamilyOverride *string
 	modelSizeLabel      *string
+	residualTailTokens  *int
 	targetNativeCtx     *int
 	targetYarnCtx       *int
 	captureOllamaPS     *bool
@@ -64,6 +67,12 @@ type rawFlags struct {
 	debug               *bool
 	progress            *string
 	progressWidth       *int
+	liveStatus          *string
+	liveTelemetry       *string
+	liveSampleSec       *int
+	liveDisplaySec      *int
+	liveTelemetrySec    *int
+	telemetryDir        *string
 }
 
 func parseFlags() rawFlags {
@@ -102,11 +111,14 @@ func parseFlags() rawFlags {
 		longJSONBytes:       flag.Int("long-json-bytes", 16384, "Approximate long JSON payload size for retention validation"),
 		turboMode:           flag.String("turbo-mode", "tq35", "TurboQuant mode to use for large-context mixed/symmetric lanes [tq25|tq35]"),
 		faModes:             flag.String("fa-modes", "", "Flash Attention request modes [on|off|both]"),
+		qjlKModes:           flag.String("qjl-k-modes", "off", "Experimental K-side QJL request modes [on|off|both]"),
+		qjlVModes:           flag.String("qjl-v-modes", "off", "Experimental V-side QJL request modes [on|off|both]; blocked lanes remain explicit"),
 		repeats:             flag.Int("repeats", 1, "Repeated deterministic validation runs for corruption-sensitive workloads"),
 		recallDistances:     flag.String("recall-distances", "0,200,500,1000,4000,16000", "Comma-separated recall distances"),
 		toolSuite:           flag.String("tool-suite", "default", "Agentic/structured-output fixture subset"),
 		modelFamilyOverride: flag.String("model-family-override", "", "Optional model family label override for summaries"),
 		modelSizeLabel:      flag.String("model-size-label", "", "Optional model size label override for summaries"),
+		residualTailTokens:  flag.Int("residual-tail-tokens", 0, "Experimental FP16 recent-token tail length (0 disables)"),
 		targetNativeCtx:     flag.Int("target-native-context", 0, "Optional advertised native context length for reporting"),
 		targetYarnCtx:       flag.Int("target-yarn-context", 0, "Optional advertised YaRN stretch context length for reporting"),
 		captureOllamaPS:     flag.Bool("capture-ollama-ps", true, "Capture `ollama ps` before and after runs when available"),
@@ -115,6 +127,12 @@ func parseFlags() rawFlags {
 		debug:               flag.Bool("debug", false, "Enable debug logging"),
 		progress:            flag.String("progress", "auto", "Progress display mode [auto|on|off]"),
 		progressWidth:       flag.Int("progress-width", 30, "Progress bar width"),
+		liveStatus:          flag.String("live-status", "auto", "Live per-test status mode [auto|on|off]"),
+		liveTelemetry:       flag.String("live-telemetry", "on", "Live per-test telemetry output [on|off]"),
+		liveSampleSec:       flag.Int("live-sample-interval-sec", 1, "Live sample cadence in seconds"),
+		liveDisplaySec:      flag.Int("live-display-interval-sec", 1, "Live display cadence in seconds"),
+		liveTelemetrySec:    flag.Int("live-telemetry-interval-sec", 1, "Live telemetry write cadence in seconds"),
+		telemetryDir:        flag.String("telemetry-dir", "", "Directory for per-test telemetry JSONL files"),
 	}
 }
 
@@ -159,6 +177,14 @@ func loadConfig(r rawFlags) (config, error) {
 	if r.faModes != nil {
 		faModesValue = *r.faModes
 	}
+	qjlKModesValue := "off"
+	if r.qjlKModes != nil {
+		qjlKModesValue = *r.qjlKModes
+	}
+	qjlVModesValue := "off"
+	if r.qjlVModes != nil {
+		qjlVModesValue = *r.qjlVModes
+	}
 	recallDistancesValue := ""
 	if r.recallDistances != nil {
 		recallDistancesValue = *r.recallDistances
@@ -182,6 +208,10 @@ func loadConfig(r rawFlags) (config, error) {
 	modelSizeLabelValue := ""
 	if r.modelSizeLabel != nil {
 		modelSizeLabelValue = *r.modelSizeLabel
+	}
+	residualTailTokensValue := 0
+	if r.residualTailTokens != nil {
+		residualTailTokensValue = max(0, *r.residualTailTokens)
 	}
 	markdownOutputValue := ""
 	if r.markdownOutput != nil {
@@ -314,6 +344,14 @@ func loadConfig(r rawFlags) (config, error) {
 	if err != nil {
 		return config{}, fmt.Errorf("invalid --fa-modes: %w", err)
 	}
+	qjlKModes, err := parseExperimentalBoolModes(qjlKModesValue)
+	if err != nil {
+		return config{}, fmt.Errorf("invalid --qjl-k-modes: %w", err)
+	}
+	qjlVModes, err := parseExperimentalBoolModes(qjlVModesValue)
+	if err != nil {
+		return config{}, fmt.Errorf("invalid --qjl-v-modes: %w", err)
+	}
 	recallDistances, err := parseIntCSVAllowEmpty(recallDistancesValue)
 	if err != nil {
 		return config{}, fmt.Errorf("invalid --recall-distances: %w", err)
@@ -334,6 +372,8 @@ func loadConfig(r rawFlags) (config, error) {
 		KVModes:             kvModes,
 		TurboMode:           turboMode,
 		FAModes:             faModes,
+		QJLKModes:           qjlKModes,
+		QJLVModes:           qjlVModes,
 		Repeats:             repeatsValue,
 		RecallDistances:     recallDistances,
 		ToolSuite:           strings.TrimSpace(toolSuiteValue),
@@ -360,6 +400,7 @@ func loadConfig(r rawFlags) (config, error) {
 		TurboHost:           strings.TrimSpace(turboHostValue),
 		ModelFamilyOverride: strings.TrimSpace(modelFamilyOverrideValue),
 		ModelSizeLabel:      strings.TrimSpace(modelSizeLabelValue),
+		ResidualTailTokens:  residualTailTokensValue,
 		ContextLadder:       contextLadder,
 		StretchContext:      stretchContextValue,
 		MinFitDecode:        minFitDecodeValue,
@@ -369,6 +410,7 @@ func loadConfig(r rawFlags) (config, error) {
 		TargetYarnCtx:       targetYarnCtxValue,
 		Debug:               *r.debug,
 		ProgressWidth:       *r.progressWidth,
+		LiveTelemetry:       true,
 	}
 
 	mode, err := parseProgressMode(*r.progress)
@@ -376,12 +418,54 @@ func loadConfig(r rawFlags) (config, error) {
 		return config{}, err
 	}
 	cfg.ProgressMode = mode
+	liveStatusValue := "auto"
+	if r.liveStatus != nil {
+		liveStatusValue = *r.liveStatus
+	}
+	liveMode, err := parseProgressMode(liveStatusValue)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.LiveStatusMode = liveMode
+	liveTelemetryValue := "on"
+	if r.liveTelemetry != nil {
+		liveTelemetryValue = *r.liveTelemetry
+	}
+	switch strings.ToLower(strings.TrimSpace(liveTelemetryValue)) {
+	case "", "on":
+		cfg.LiveTelemetry = true
+	case "off":
+		cfg.LiveTelemetry = false
+	default:
+		return config{}, fmt.Errorf("invalid live telemetry mode %q", liveTelemetryValue)
+	}
+	liveSampleSec := 1
+	if r.liveSampleSec != nil {
+		liveSampleSec = *r.liveSampleSec
+	}
+	liveDisplaySec := 1
+	if r.liveDisplaySec != nil {
+		liveDisplaySec = *r.liveDisplaySec
+	}
+	liveTelemetrySec := 1
+	if r.liveTelemetrySec != nil {
+		liveTelemetrySec = *r.liveTelemetrySec
+	}
+	cfg.LiveSampleInterval = time.Duration(max(1, liveSampleSec)) * time.Second
+	cfg.LiveDisplayInterval = time.Duration(max(1, liveDisplaySec)) * time.Second
+	cfg.LiveWriteInterval = time.Duration(max(1, liveTelemetrySec)) * time.Second
 
 	cfg.OutputPath = *r.output
 	cfg.JSONLPath = *r.jsonlOutput
 	cfg.SummaryPath = *r.summaryOutput
 	cfg.MarkdownPath = markdownOutputValue
 	fillDefaultOutputs(&cfg)
+	if r.telemetryDir != nil {
+		cfg.TelemetryDir = strings.TrimSpace(*r.telemetryDir)
+	}
+	if cfg.TelemetryDir == "" {
+		cfg.TelemetryDir = filepath.Join(cfg.OutputDir, "telemetry")
+	}
 	return cfg, nil
 }
 
@@ -544,6 +628,20 @@ func parseFAModes(value, profile string) ([]bool, error) {
 	}
 }
 
+func parseExperimentalBoolModes(value string) ([]bool, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	switch mode {
+	case "", "off":
+		return []bool{false}, nil
+	case "on":
+		return []bool{true}, nil
+	case "both":
+		return []bool{false, true}, nil
+	default:
+		return nil, fmt.Errorf("value %q must be one of on, off, both", value)
+	}
+}
+
 func parseWorkloads(value string) ([]workloadName, error) {
 	parts, err := parseCSV(value)
 	if err != nil {
@@ -553,7 +651,7 @@ func parseWorkloads(value string) ([]workloadName, error) {
 	for _, part := range parts {
 		w := workloadName(strings.ToLower(strings.TrimSpace(part)))
 		switch w {
-		case workloadPrefillHeavy, workloadDecodeGrowth, workloadParallelAmplifier, workloadNearOOMStaircase, workloadFitCeiling, workloadLongContextRecall, workloadLongJSONRetention, workloadPromptFileRegress, workloadDecodeCorruption, workloadAgenticStructured:
+		case workloadPrefillHeavy, workloadDecodeGrowth, workloadParallelAmplifier, workloadNearOOMStaircase, workloadFitCeiling, workloadLongContextRecall, workloadLongJSONRetention, workloadPromptFileRegress, workloadDecodeCorruption, workloadAgenticStructured, workloadNIAHRetrieval:
 			out = append(out, w)
 		default:
 			return nil, fmt.Errorf("unknown workload %q", part)
@@ -606,6 +704,9 @@ func fillDefaultOutputs(cfg *config) {
 	}
 	if cfg.MarkdownPath == "" {
 		cfg.MarkdownPath = cfg.SummaryPath
+	}
+	if cfg.TelemetryDir == "" {
+		cfg.TelemetryDir = filepath.Join(outputDir, "telemetry")
 	}
 }
 
@@ -670,13 +771,13 @@ func profileWorkloads(profile string) []workloadName {
 	case "capacity", "spill":
 		return []workloadName{workloadNearOOMStaircase}
 	case "large-context":
-		return []workloadName{workloadFitCeiling, workloadPrefillHeavy, workloadLongContextRecall, workloadDecodeCorruption, workloadPromptFileRegress, workloadLongJSONRetention}
+		return []workloadName{workloadFitCeiling, workloadPrefillHeavy, workloadLongContextRecall, workloadNIAHRetrieval, workloadDecodeCorruption, workloadPromptFileRegress, workloadLongJSONRetention}
 	case "test-matrix":
-		return []workloadName{workloadLongContextRecall, workloadDecodeCorruption, workloadPromptFileRegress}
+		return []workloadName{workloadLongContextRecall, workloadNIAHRetrieval, workloadDecodeCorruption, workloadPromptFileRegress}
 	case "agentic":
 		return []workloadName{workloadAgenticStructured}
 	case "memory":
-		return []workloadName{workloadFitCeiling, workloadPrefillHeavy, workloadLongContextRecall, workloadDecodeCorruption}
+		return []workloadName{workloadFitCeiling, workloadPrefillHeavy, workloadLongContextRecall, workloadNIAHRetrieval, workloadDecodeCorruption}
 	case "impact":
 		return []workloadName{workloadPrefillHeavy, workloadDecodeGrowth}
 	default:
@@ -736,6 +837,7 @@ func ensureOutputDirs(cfg config) error {
 		filepath.Dir(cfg.JSONLPath),
 		filepath.Dir(cfg.SummaryPath),
 		filepath.Dir(cfg.MarkdownPath),
+		cfg.TelemetryDir,
 	}
 	for _, dir := range dirs {
 		if dir == "." || dir == "" {

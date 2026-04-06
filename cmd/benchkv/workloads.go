@@ -9,6 +9,28 @@ func effectiveFAModes(cfg config) []bool {
 	return cfg.FAModes
 }
 
+func effectiveQJLModes(modes []bool) []bool {
+	if len(modes) == 0 {
+		return []bool{false}
+	}
+	return modes
+}
+
+func effectiveResidualTailTokens(cfg config) []int {
+	if cfg.ResidualTailTokens > 0 {
+		return []int{cfg.ResidualTailTokens}
+	}
+	if cfg.Profile == "large-context" || cfg.Profile == "test-matrix" || cfg.Profile == "memory" {
+		return []int{0, 128}
+	}
+	for _, workload := range cfg.Workloads {
+		if workload == workloadFitCeiling || workload == workloadLongContextRecall || workload == workloadNIAHRetrieval {
+			return []int{0, 128}
+		}
+	}
+	return []int{0}
+}
+
 func buildStandardCells(cfg config) []sweepCell {
 	switch cfg.Profile {
 	case "impact":
@@ -27,17 +49,26 @@ func buildStandardCells(cfg config) []sweepCell {
 	for _, host := range cfg.Hosts {
 		for _, kvMode := range cfg.KVModes {
 			for _, faRequested := range effectiveFAModes(cfg) {
-				for _, workload := range cfg.Workloads {
-					if workload == workloadNearOOMStaircase {
-						continue
-					}
-					for _, spec := range expandWorkload(cfg, workload) {
-						cells = append(cells, sweepCell{
-							Host:        host,
-							KVMode:      kvMode,
-							Workload:    spec,
-							FARequested: faRequested,
-						})
+				for _, qjlKRequested := range effectiveQJLModes(cfg.QJLKModes) {
+					for _, qjlVRequested := range effectiveQJLModes(cfg.QJLVModes) {
+						for _, residualTailTokens := range effectiveResidualTailTokens(cfg) {
+							for _, workload := range cfg.Workloads {
+								if workload == workloadNearOOMStaircase {
+									continue
+								}
+								for _, spec := range expandWorkload(cfg, workload) {
+									cells = append(cells, sweepCell{
+										Host:               host,
+										KVMode:             kvMode,
+										Workload:           spec,
+										FARequested:        faRequested,
+										QJLKRequested:      qjlKRequested,
+										QJLVRequested:      qjlVRequested,
+										ResidualTailTokens: residualTailTokens,
+									})
+								}
+							}
+						}
 					}
 				}
 			}
@@ -51,17 +82,26 @@ func buildRegressionCells(cfg config) []sweepCell {
 	for _, host := range cfg.Hosts {
 		for _, kvMode := range cfg.KVModes {
 			for _, faRequested := range effectiveFAModes(cfg) {
-				for _, workload := range cfg.Workloads {
-					if workload == workloadNearOOMStaircase {
-						continue
-					}
-					for _, spec := range expandWorkload(cfg, workload) {
-						cells = append(cells, sweepCell{
-							Host:        host,
-							KVMode:      kvMode,
-							Workload:    spec,
-							FARequested: faRequested,
-						})
+				for _, qjlKRequested := range effectiveQJLModes(cfg.QJLKModes) {
+					for _, qjlVRequested := range effectiveQJLModes(cfg.QJLVModes) {
+						for _, residualTailTokens := range effectiveResidualTailTokens(cfg) {
+							for _, workload := range cfg.Workloads {
+								if workload == workloadNearOOMStaircase {
+									continue
+								}
+								for _, spec := range expandWorkload(cfg, workload) {
+									cells = append(cells, sweepCell{
+										Host:               host,
+										KVMode:             kvMode,
+										Workload:           spec,
+										FARequested:        faRequested,
+										QJLKRequested:      qjlKRequested,
+										QJLVRequested:      qjlVRequested,
+										ResidualTailTokens: residualTailTokens,
+									})
+								}
+							}
+						}
 					}
 				}
 			}
@@ -78,17 +118,26 @@ func buildTurboBenefitCells(cfg config) []sweepCell {
 		}
 		for _, kvMode := range cfg.KVModes {
 			for _, faRequested := range effectiveFAModes(cfg) {
-				for _, workload := range cfg.Workloads {
-					if workload == workloadNearOOMStaircase {
-						continue
-					}
-					for _, spec := range expandWorkload(cfg, workload) {
-						cells = append(cells, sweepCell{
-							Host:        host,
-							KVMode:      kvMode,
-							Workload:    spec,
-							FARequested: faRequested,
-						})
+				for _, qjlKRequested := range effectiveQJLModes(cfg.QJLKModes) {
+					for _, qjlVRequested := range effectiveQJLModes(cfg.QJLVModes) {
+						for _, residualTailTokens := range effectiveResidualTailTokens(cfg) {
+							for _, workload := range cfg.Workloads {
+								if workload == workloadNearOOMStaircase {
+									continue
+								}
+								for _, spec := range expandWorkload(cfg, workload) {
+									cells = append(cells, sweepCell{
+										Host:               host,
+										KVMode:             kvMode,
+										Workload:           spec,
+										FARequested:        faRequested,
+										QJLKRequested:      qjlKRequested,
+										QJLVRequested:      qjlVRequested,
+										ResidualTailTokens: residualTailTokens,
+									})
+								}
+							}
+						}
 					}
 				}
 			}
@@ -119,13 +168,22 @@ func buildImpactCells(cfg config) []sweepCell {
 	for _, host := range cfg.Hosts {
 		for _, kvMode := range cfg.KVModes {
 			for _, faRequested := range effectiveFAModes(cfg) {
-				for _, spec := range specs {
-					cells = append(cells, sweepCell{
-						Host:        host,
-						KVMode:      kvMode,
-						Workload:    spec,
-						FARequested: faRequested,
-					})
+				for _, qjlKRequested := range effectiveQJLModes(cfg.QJLKModes) {
+					for _, qjlVRequested := range effectiveQJLModes(cfg.QJLVModes) {
+						for _, residualTailTokens := range effectiveResidualTailTokens(cfg) {
+							for _, spec := range specs {
+								cells = append(cells, sweepCell{
+									Host:               host,
+									KVMode:             kvMode,
+									Workload:           spec,
+									FARequested:        faRequested,
+									QJLKRequested:      qjlKRequested,
+									QJLVRequested:      qjlVRequested,
+									ResidualTailTokens: residualTailTokens,
+								})
+							}
+						}
+					}
 				}
 			}
 		}
@@ -138,17 +196,26 @@ func buildLargeContextCells(cfg config) []sweepCell {
 	for _, host := range cfg.Hosts {
 		for _, kvMode := range cfg.KVModes {
 			for _, faRequested := range effectiveFAModes(cfg) {
-				for _, workload := range cfg.Workloads {
-					spec, ok := makeWorkloadSpec(cfg, workload, cfg.StretchContext, 1)
-					if !ok {
-						continue
+				for _, qjlKRequested := range effectiveQJLModes(cfg.QJLKModes) {
+					for _, qjlVRequested := range effectiveQJLModes(cfg.QJLVModes) {
+						for _, residualTailTokens := range effectiveResidualTailTokens(cfg) {
+							for _, workload := range cfg.Workloads {
+								spec, ok := makeWorkloadSpec(cfg, workload, cfg.StretchContext, 1)
+								if !ok {
+									continue
+								}
+								cells = append(cells, sweepCell{
+									Host:               host,
+									KVMode:             kvMode,
+									Workload:           spec,
+									FARequested:        faRequested,
+									QJLKRequested:      qjlKRequested,
+									QJLVRequested:      qjlVRequested,
+									ResidualTailTokens: residualTailTokens,
+								})
+							}
+						}
 					}
-					cells = append(cells, sweepCell{
-						Host:        host,
-						KVMode:      kvMode,
-						Workload:    spec,
-						FARequested: faRequested,
-					})
 				}
 			}
 		}
@@ -203,6 +270,10 @@ func makeWorkloadSpec(cfg config, workload workloadName, numCtx, concurrency int
 	case workloadLongContextRecall:
 		promptTokens := cmp.Or(cfg.PromptTokens, promptTokensAt90Percent(numCtx))
 		maxTokens := cmp.Or(cfg.MaxTokens, 64)
+		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
+	case workloadNIAHRetrieval:
+		promptTokens := cmp.Or(cfg.PromptTokens, promptTokensAt90Percent(numCtx))
+		maxTokens := cmp.Or(cfg.MaxTokens, 32)
 		return workloadSpec{Name: workload, NumCtx: numCtx, PromptTokensTarget: promptTokens, MaxTokens: maxTokens, Concurrency: 1}, true
 	case workloadLongJSONRetention:
 		promptTokens := cmp.Or(cfg.PromptTokens, promptTokensAt90Percent(numCtx))

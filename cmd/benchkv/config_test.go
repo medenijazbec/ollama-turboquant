@@ -137,3 +137,30 @@ func TestParseIntCSVAllowEmptyAllowsZero(t *testing.T) {
 		t.Fatalf("unexpected parsed values: %#v", got)
 	}
 }
+
+func TestParseExperimentalBoolModes(t *testing.T) {
+	tests := []struct {
+		value string
+		want  []bool
+	}{
+		{value: "", want: []bool{false}},
+		{value: "off", want: []bool{false}},
+		{value: "on", want: []bool{true}},
+		{value: "both", want: []bool{false, true}},
+	}
+
+	for _, tt := range tests {
+		got, err := parseExperimentalBoolModes(tt.value)
+		if err != nil {
+			t.Fatalf("parseExperimentalBoolModes(%q) failed: %v", tt.value, err)
+		}
+		if len(got) != len(tt.want) {
+			t.Fatalf("parseExperimentalBoolModes(%q) len = %d, want %d", tt.value, len(got), len(tt.want))
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Fatalf("parseExperimentalBoolModes(%q)[%d] = %t, want %t", tt.value, i, got[i], tt.want[i])
+			}
+		}
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,14 +16,20 @@ type hostMetricsMonitor struct {
 	interval time.Duration
 	enabled  bool
 
-	mu          sync.Mutex
-	available   bool
-	source      string
-	baselineRAM int64
-	currentRAM  int64
-	peakRAM     int64
-	processRSS  int64
-	samples     int
+	mu           sync.Mutex
+	available    bool
+	source       string
+	baselineRAM  int64
+	currentRAM   int64
+	peakRAM      int64
+	processRSS   int64
+	selfRSS      int64
+	availableRAM int64
+	cpuUtil      float64
+	hasCPUUtil   bool
+	lastCPUIdle  uint64
+	lastCPUTotal uint64
+	samples      int
 }
 
 func newHostMetricsMonitor(interval time.Duration, enabled bool) *hostMetricsMonitor {
@@ -55,11 +62,13 @@ func (m *hostMetricsMonitor) run(ctx context.Context) {
 }
 
 func (m *hostMetricsMonitor) poll() {
-	used, source, ok := readHostRAMUsed()
+	used, available, source, ok := readHostRAMUsed()
 	if !ok {
 		return
 	}
 	rss := captureOllamaProcessRSS()
+	selfRSS := captureSelfRSS()
+	cpuUtil, cpuOK := readCPUUtilization(&m.lastCPUIdle, &m.lastCPUTotal)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -69,11 +78,19 @@ func (m *hostMetricsMonitor) poll() {
 		m.baselineRAM = used
 	}
 	m.currentRAM = used
+	m.availableRAM = available
 	if used > m.peakRAM {
 		m.peakRAM = used
 	}
 	if rss > m.processRSS {
 		m.processRSS = rss
+	}
+	if selfRSS > 0 {
+		m.selfRSS = selfRSS
+	}
+	if cpuOK {
+		m.cpuUtil = cpuUtil
+		m.hasCPUUtil = true
 	}
 	m.samples++
 }
@@ -86,8 +103,8 @@ func (m *hostMetricsMonitor) stats() hostMemoryStats {
 	}
 
 	stats := hostMemoryStats{
-		Available:        true,
-		Source:           firstNonEmpty(m.source, "unavailable"),
+		Available: true,
+		Source:    firstNonEmpty(m.source, "unavailable"),
 		HostRAMBeforeBytes: func() *int64 {
 			if m.baselineRAM > 0 {
 				return int64Ptr(m.baselineRAM)
@@ -104,10 +121,19 @@ func (m *hostMetricsMonitor) stats() hostMemoryStats {
 	if m.processRSS > 0 {
 		stats.ProcessRSSBytes = int64Ptr(m.processRSS)
 	}
+	if m.selfRSS > 0 {
+		stats.SelfRSSBytes = int64Ptr(m.selfRSS)
+	}
+	if m.availableRAM > 0 {
+		stats.SystemAvailableBytes = int64Ptr(m.availableRAM)
+	}
+	if m.hasCPUUtil {
+		stats.CPUUtilPercent = float64Ptr(m.cpuUtil)
+	}
 	return stats
 }
 
-func readHostRAMUsed() (int64, string, bool) {
+func readHostRAMUsed() (int64, int64, string, bool) {
 	file, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return readHostRAMUsedFromFree()
@@ -136,16 +162,16 @@ func readHostRAMUsed() (int64, string, bool) {
 
 	used := (memTotalKB - memAvailableKB) * 1024
 	if used < 0 {
-		return 0, "", false
+		return 0, 0, "", false
 	}
-	return used, "proc-meminfo", true
+	return used, memAvailableKB * 1024, "proc-meminfo", true
 }
 
-func readHostRAMUsedFromFree() (int64, string, bool) {
+func readHostRAMUsedFromFree() (int64, int64, string, bool) {
 	cmd := exec.Command("free", "-b")
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, "", false
+		return 0, 0, "", false
 	}
 
 	for _, line := range strings.Split(string(out), "\n") {
@@ -156,11 +182,11 @@ func readHostRAMUsedFromFree() (int64, string, bool) {
 		total, err1 := strconv.ParseInt(fields[1], 10, 64)
 		available, err2 := strconv.ParseInt(fields[6], 10, 64)
 		if err1 != nil || err2 != nil {
-			return 0, "", false
+			return 0, 0, "", false
 		}
-		return total - available, "free", true
+		return total - available, available, "free", true
 	}
-	return 0, "", false
+	return 0, 0, "", false
 }
 
 func captureOllamaProcessRSS() int64 {
@@ -187,4 +213,72 @@ func captureOllamaProcessRSS() int64 {
 		return -1
 	}
 	return totalRSS
+}
+
+func captureSelfRSS() int64 {
+	data, err := os.ReadFile("/proc/self/status")
+	if err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "VmRSS:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if rssKB, parseErr := strconv.ParseInt(fields[1], 10, 64); parseErr == nil {
+						return rssKB * 1024
+					}
+				}
+			}
+		}
+	}
+	pid := os.Getpid()
+	cmd := exec.Command("ps", "-o", "rss=", "-p", fmt.Sprintf("%d", pid))
+	out, err := cmd.Output()
+	if err != nil {
+		return -1
+	}
+	rssKB, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return -1
+	}
+	return rssKB * 1024
+}
+
+func readCPUUtilization(lastIdle, lastTotal *uint64) (float64, bool) {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, false
+	}
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 {
+		return 0, false
+	}
+	fields := strings.Fields(lines[0])
+	if len(fields) < 8 || fields[0] != "cpu" {
+		return 0, false
+	}
+	var vals []uint64
+	for _, field := range fields[1:] {
+		v, parseErr := strconv.ParseUint(field, 10, 64)
+		if parseErr != nil {
+			return 0, false
+		}
+		vals = append(vals, v)
+	}
+	var total uint64
+	for _, v := range vals {
+		total += v
+	}
+	idle := vals[3]
+	if *lastTotal == 0 {
+		*lastIdle = idle
+		*lastTotal = total
+		return 0, false
+	}
+	totalDelta := total - *lastTotal
+	idleDelta := idle - *lastIdle
+	*lastIdle = idle
+	*lastTotal = total
+	if totalDelta == 0 {
+		return 0, false
+	}
+	return (1 - float64(idleDelta)/float64(totalDelta)) * 100, true
 }

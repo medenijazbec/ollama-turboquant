@@ -25,7 +25,7 @@ func isLargeContextWorkload(workload workloadName) bool {
 	}
 }
 
-func runLargeContextCell(cfg config, cell sweepCell, promptGen *promptGenerator, preflight hostPreflight, tracker *progressTracker) ([]workerResult, []epochAggregate, error) {
+func runLargeContextCell(cfg config, cell sweepCell, promptGen *promptGenerator, preflight hostPreflight, tracker *progressTracker, live *liveManager, testIndex *int, testTotal int) ([]workerResult, []epochAggregate, error) {
 	var allWorkers []workerResult
 	var allAggs []epochAggregate
 	var rejected []ladderRejection
@@ -72,7 +72,8 @@ func runLargeContextCell(cfg config, cell sweepCell, promptGen *promptGenerator,
 					Warmup:      true,
 				})
 			}
-			rows, agg := runEpoch(cfg, rungCell, preflight, cal, warmup+1, true)
+			session := createLiveSession(live, cfg, rungCell, nextTestIndex(testIndex), testTotal, warmup+1, cfg.Warmup, 1, 1, idx+1, len(cfg.ContextLadder))
+			rows, agg := runEpoch(cfg, rungCell, preflight, cal, warmup+1, true, session)
 			rows, agg = applyLargeContextMetadata(cfg, rungCell, rows, agg, requestedTop, attempted, idx, rejected)
 			rungWorkers = append(rungWorkers, rows...)
 			rungAggs = append(rungAggs, agg)
@@ -104,7 +105,8 @@ func runLargeContextCell(cfg config, cell sweepCell, promptGen *promptGenerator,
 					EpochTotal:  cfg.Epochs,
 				})
 			}
-			rows, agg := runEpoch(cfg, rungCell, preflight, cal, epoch+1, false)
+			session := createLiveSession(live, cfg, rungCell, nextTestIndex(testIndex), testTotal, epoch+1, cfg.Epochs, 1, max(1, cfg.Repeats), idx+1, len(cfg.ContextLadder))
+			rows, agg := runEpoch(cfg, rungCell, preflight, cal, epoch+1, false, session)
 			rows, agg = applyLargeContextMetadata(cfg, rungCell, rows, agg, requestedTop, attempted, idx, rejected)
 			rungWorkers = append(rungWorkers, rows...)
 			rungAggs = append(rungAggs, agg)

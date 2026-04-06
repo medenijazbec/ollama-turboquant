@@ -38,6 +38,10 @@ func runBenchmark(cfg config, tracker *progressTracker) ([]workerResult, []epoch
 	if tracker != nil {
 		tracker.SetTotal(estimateTotalUnitsWithPreflight(cfg, preflights))
 	}
+	totalTests := max(1, estimateTotalUnitsWithPreflight(cfg, preflights)-len(cfg.Hosts))
+	live := newLiveManager(cfg, cfg.Profile, totalTests)
+	defer live.Close()
+	testIndex := 0
 
 	var workers []workerResult
 	var aggregates []epochAggregate
@@ -56,7 +60,7 @@ func runBenchmark(cfg config, tracker *progressTracker) ([]workerResult, []epoch
 			continue
 		}
 
-		cellWorkers, cellAggs, err := runCell(cfg, cell, promptGen, preflight, tracker)
+		cellWorkers, cellAggs, err := runCell(cfg, cell, promptGen, preflight, tracker, live, &testIndex, totalTests)
 		workers = append(workers, cellWorkers...)
 		aggregates = append(aggregates, cellAggs...)
 		if err != nil && cfg.FailFast {
@@ -71,7 +75,7 @@ func runBenchmark(cfg config, tracker *progressTracker) ([]workerResult, []epoch
 			}
 			preflight := preflights[host.BaseURL]
 			for _, kvMode := range cfg.KVModes {
-				record, cellWorkers, cellAggs, err := runStaircase(cfg, host, kvMode, promptGen, preflight, tracker)
+				record, cellWorkers, cellAggs, err := runStaircase(cfg, host, kvMode, promptGen, preflight, tracker, live, &testIndex, totalTests)
 				workers = append(workers, cellWorkers...)
 				aggregates = append(aggregates, cellAggs...)
 				staircases = append(staircases, record)
@@ -113,6 +117,9 @@ func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText
 		RequestedCacheTypeV:     requestedV,
 		SymmetricRequested:      strings.EqualFold(requestedK, requestedV),
 		FlashAttentionRequested: cell.FARequested,
+		QJLKRequested:           cell.QJLKRequested,
+		QJLVRequested:           cell.QJLVRequested,
+		ResidualTailTokens:      cell.ResidualTailTokens,
 		RequestedMode:           summarizeRequestedOrEffectiveMode(requestedK, requestedV),
 		EffectiveMode:           summarizeRequestedOrEffectiveMode(requestedK, requestedV),
 		KVBackendRequested:      requestedKVBackend(cell.KVMode),
@@ -154,6 +161,9 @@ func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText
 		KVModeRequestedV:   row.KVModeRequestedV,
 		RequestedMode:      row.RequestedMode,
 		EffectiveMode:      row.EffectiveMode,
+		QJLKRequested:      row.QJLKRequested,
+		QJLVRequested:      row.QJLVRequested,
+		ResidualTailTokens: row.ResidualTailTokens,
 		KVAlgoResolved:     row.KVAlgoResolved,
 		KVBackendRequested: row.KVBackendRequested,
 		KVPath:             row.KVPath,
@@ -173,9 +183,9 @@ func unsupportedRow(cfg config, cell sweepCell, preflight hostPreflight, errText
 	return row, agg
 }
 
-func runCell(cfg config, cell sweepCell, promptGen *promptGenerator, preflight hostPreflight, tracker *progressTracker) ([]workerResult, []epochAggregate, error) {
+func runCell(cfg config, cell sweepCell, promptGen *promptGenerator, preflight hostPreflight, tracker *progressTracker, live *liveManager, testIndex *int, testTotal int) ([]workerResult, []epochAggregate, error) {
 	if cfg.Profile == "large-context" || isLargeContextWorkload(cell.Workload.Name) {
-		return runLargeContextCell(cfg, cell, promptGen, preflight, tracker)
+		return runLargeContextCell(cfg, cell, promptGen, preflight, tracker, live, testIndex, testTotal)
 	}
 	cal, err := promptGen.promptForTarget(context.Background(), cell.Host, cfg.Model, cell.Workload.PromptTokensTarget, max(cell.Workload.NumCtx, 4096), cfg.Timeout)
 	if err != nil {
@@ -199,12 +209,14 @@ func runCell(cfg config, cell sweepCell, promptGen *promptGenerator, preflight h
 				Warmup:      true,
 			})
 		}
-		rows, agg := runEpoch(cfg, cell, preflight, cal, warmup+1, true)
+		session := createLiveSession(live, cfg, cell, nextTestIndex(testIndex), testTotal, warmup+1, cfg.Warmup, 1, 1, 1, 1)
+		rows, agg := runEpoch(cfg, cell, preflight, cal, warmup+1, true, session)
 		if agg.Status != statusOK {
 			if tracker != nil {
 				tracker.Status(fmt.Sprintf("retrying warmup: %s %s %s ctx=%d conc=%d warmup=%d", cell.Host.Label, cell.KVMode, cell.Workload.Name, cell.Workload.NumCtx, cell.Workload.Concurrency, warmup+1))
 			}
-			retryRows, retryAgg := runEpoch(cfg, cell, preflight, cal, warmup+1, true)
+			retrySession := createLiveSession(live, cfg, cell, nextTestIndex(testIndex), testTotal, warmup+1, cfg.Warmup, 1, 1, 1, 1)
+			retryRows, retryAgg := runEpoch(cfg, cell, preflight, cal, warmup+1, true, retrySession)
 			allWorkers = append(allWorkers, rows...)
 			allAggs = append(allAggs, agg)
 			allWorkers = append(allWorkers, retryRows...)
@@ -236,7 +248,8 @@ func runCell(cfg config, cell sweepCell, promptGen *promptGenerator, preflight h
 				EpochTotal:  cfg.Epochs,
 			})
 		}
-		rows, agg := runEpoch(cfg, cell, preflight, cal, epoch+1, false)
+		session := createLiveSession(live, cfg, cell, nextTestIndex(testIndex), testTotal, epoch+1, cfg.Epochs, 1, max(1, cfg.Repeats), 1, 1)
+		rows, agg := runEpoch(cfg, cell, preflight, cal, epoch+1, false, session)
 		allWorkers = append(allWorkers, rows...)
 		allAggs = append(allAggs, agg)
 		if tracker != nil {
@@ -250,7 +263,7 @@ func runCell(cfg config, cell sweepCell, promptGen *promptGenerator, preflight h
 	return allWorkers, allAggs, nil
 }
 
-func runStaircase(cfg config, host hostTarget, kvMode string, promptGen *promptGenerator, preflight hostPreflight, tracker *progressTracker) (staircaseRecord, []workerResult, []epochAggregate, error) {
+func runStaircase(cfg config, host hostTarget, kvMode string, promptGen *promptGenerator, preflight hostPreflight, tracker *progressTracker, live *liveManager, testIndex *int, testTotal int) (staircaseRecord, []workerResult, []epochAggregate, error) {
 	record := staircaseRecord{
 		HostLabel: host.Label,
 		Host:      host.BaseURL,
@@ -278,7 +291,7 @@ func runStaircase(cfg config, host hostTarget, kvMode string, promptGen *promptG
 				continue
 			}
 			cell := sweepCell{Host: host, KVMode: kvMode, Workload: spec}
-			cellWorkers, cellAggs, err := runCell(cfg, cell, promptGen, preflight, tracker)
+			cellWorkers, cellAggs, err := runCell(cfg, cell, promptGen, preflight, tracker, live, testIndex, testTotal)
 			workers = append(workers, cellWorkers...)
 			aggs = append(aggs, cellAggs...)
 
@@ -364,7 +377,7 @@ func remainingStaircaseUnits(cfg config, failedConc, failedNumCtx int) int {
 	return remainingCells * unitsPerCell
 }
 
-func runEpoch(cfg config, cell sweepCell, preflight hostPreflight, cal promptCalibration, epoch int, warmup bool) ([]workerResult, epochAggregate) {
+func runEpoch(cfg config, cell sweepCell, preflight hostPreflight, cal promptCalibration, epoch int, warmup bool, session *liveSession) ([]workerResult, epochAggregate) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -375,6 +388,10 @@ func runEpoch(cfg config, cell sweepCell, preflight hostPreflight, cal promptCal
 
 	monitor := newGPUMonitor(cfg.ProbeInterval, cfg.CaptureGPU)
 	hostMonitor := newHostMetricsMonitor(cfg.ProbeInterval, true)
+	if session != nil {
+		session.SetHostAndGPUMonitors(hostMonitor, monitor)
+		session.SetStage("loading")
+	}
 	go monitor.run(ctx)
 	go hostMonitor.run(ctx)
 
@@ -385,7 +402,7 @@ func runEpoch(cfg config, cell sweepCell, preflight hostPreflight, cal promptCal
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx] = runWorker(cfg, cell, preflight, cal, epoch, warmup, idx)
+			results[idx] = runWorker(cfg, cell, preflight, cal, epoch, warmup, idx, session)
 		}(workerIndex)
 	}
 	wg.Wait()
@@ -443,11 +460,25 @@ func runEpoch(cfg config, cell sweepCell, preflight hostPreflight, cal promptCal
 		results[i].ResidencyKind = string(deriveResidencyKind(results[i]))
 		applyDerivedStatuses(&results[i])
 	}
-
-	return results, aggregateEpoch(results, time.Since(start))
+	if session != nil {
+		session.SetStage("save")
+	}
+	agg := aggregateEpoch(results, time.Since(start))
+	if session != nil {
+		terminal := "done"
+		if agg.Status != statusOK {
+			terminal = "failed"
+		}
+		summary := session.Close(terminal, agg.Error, agg.PromptEvalCount, agg.GeneratedTokens)
+		for i := range results {
+			applyLiveSummaryToWorker(&results[i], summary)
+		}
+		applyLiveSummaryToAggregate(&agg, summary)
+	}
+	return results, agg
 }
 
-func runWorker(cfg config, cell sweepCell, preflight hostPreflight, cal promptCalibration, epoch int, warmup bool, workerIndex int) workerResult {
+func runWorker(cfg config, cell sweepCell, preflight hostPreflight, cal promptCalibration, epoch int, warmup bool, workerIndex int, session *liveSession) workerResult {
 	requestedK, requestedV, _ := splitBenchmarkKVMode(cell.KVMode)
 	row := workerResult{
 		Host:                    cell.Host.BaseURL,
@@ -507,6 +538,7 @@ func runWorker(cfg config, cell sweepCell, preflight hostPreflight, cal promptCa
 		return row
 	}
 	applyFlashAttentionOption(options, cell.FARequested)
+	applyExperimentalTurboQuantOptions(options, cfg, cell)
 
 	req := &api.GenerateRequest{
 		Model:     cfg.Model,
@@ -521,6 +553,9 @@ func runWorker(cfg config, cell sweepCell, preflight hostPreflight, cal promptCa
 	defer cancel()
 
 	requestStart := time.Now()
+	if session != nil {
+		session.SetStage("prefill")
+	}
 	var ttft time.Duration
 	var ttftOnce sync.Once
 	var finalMetrics *api.Metrics
@@ -529,17 +564,43 @@ func runWorker(cfg config, cell sweepCell, preflight hostPreflight, cal promptCa
 		ttftOnce.Do(func() {
 			if strings.TrimSpace(resp.Response) != "" || strings.TrimSpace(resp.Thinking) != "" {
 				ttft = time.Since(requestStart)
+				if session != nil {
+					session.SetStage("decode")
+				}
 			}
 		})
+		if session != nil {
+			session.UpdateWorker(workerIndex, approxGeneratedTokens(resp.Response, resp.Thinking))
+		}
 		if resp.Done {
 			copy := resp.Metrics
 			finalMetrics = &copy
+			if session != nil {
+				session.SetPromptSeen(copy.PromptEvalCount)
+				var kvBytes *int64
+				if copy.KVCacheBytes > 0 {
+					v := int64(copy.KVCacheBytes)
+					kvBytes = &v
+				}
+				session.SetEffectiveRuntime(
+					firstNonEmpty(copy.EffectiveMode, copy.ResolvedKVCacheType, row.KVModeRequested),
+					firstNonEmpty(copy.ResolvedKVCacheTypeK, row.KVModeRequestedK),
+					firstNonEmpty(copy.ResolvedKVCacheTypeV, row.KVModeRequestedV),
+					copy.FAEnabled,
+					copy.FallbackApplied,
+					copy.FallbackReason,
+					kvBytes,
+				)
+			}
 		}
 		return nil
 	})
 	row.WallMS = float64(time.Since(requestStart)) / float64(time.Millisecond)
 	row.WallTimeS = row.WallMS / 1000
 	if err != nil {
+		if session != nil {
+			session.SetValidation("", "")
+		}
 		row.Status = statusFailed
 		row.Success = boolPtr(false)
 		row.Error = err.Error()
@@ -593,6 +654,25 @@ func runWorker(cfg config, cell sweepCell, preflight hostPreflight, cal promptCa
 	row.SupportTier = finalMetrics.SupportTier
 	row.HybridKVArchitecture = finalMetrics.HybridKVArchitecture
 	row.TQBlockSize = finalMetrics.TQBlockSize
+	row.VReconstructionComputeDType = finalMetrics.VReconstructionComputeDType
+	row.SegmentedHeadActive = finalMetrics.SegmentedHeadActive
+	row.SegmentedHeadPlan = finalMetrics.SegmentedHeadPlan
+	row.AttentionSurfacePolicyRequested = finalMetrics.AttentionSurfacePolicyRequested
+	row.AttentionSurfacePolicyEffective = finalMetrics.AttentionSurfacePolicyEffective
+	row.AttentionSurfacePolicy = finalMetrics.AttentionSurfacePolicy
+	row.AttentionSurfaceBehavior = finalMetrics.AttentionSurfaceBehavior
+	row.AttentionSurfaceOverrideApplied = finalMetrics.AttentionSurfaceOverrideApplied
+	row.AttentionSurfaceOverrideReason = finalMetrics.AttentionSurfaceOverrideReason
+	row.AttentionSurfaceClasses = finalMetrics.AttentionSurfaceClasses
+	row.QJLKEffective = finalMetrics.QJLKEnabled
+	row.QJLVEffective = finalMetrics.QJLVEnabled
+	row.QJLKEnabled = finalMetrics.QJLKEnabled
+	row.QJLVEnabled = finalMetrics.QJLVEnabled
+	row.ResidualTailTokens = finalMetrics.ResidualTailTokens
+	row.ExperimentalWeightQuantization = finalMetrics.ExperimentalWeightQuantization
+	row.ExperimentalWeightQuantPolicy = finalMetrics.ExperimentalWeightQuantPolicy
+	row.ExperimentalWeightQuantSource = finalMetrics.ExperimentalWeightQuantSource
+	row.ExperimentalWeightQuantActive = finalMetrics.ExperimentalWeightQuantActive
 	row.PromptEvalCount = finalMetrics.PromptEvalCount
 	row.PromptTokens = finalMetrics.PromptEvalCount
 	row.EvalCount = finalMetrics.EvalCount
@@ -619,12 +699,36 @@ func runWorker(cfg config, cell sweepCell, preflight hostPreflight, cal promptCa
 		row.Success = boolPtr(false)
 		row.Error = err.Error()
 	}
+	if session != nil {
+		session.SetStage("validate")
+		session.SetValidation(string(validationKindForWorkload(cell.Workload.Name)), "running")
+	}
 	validation := runValidation(cfg, cell, row)
 	row.ValidationKind = string(validation.Kind)
 	row.ValidationStatus = string(validation.Status)
 	row.ValidationExpected = validation.Expected
 	row.ValidationObserved = validation.Observed
 	row.ValidationError = validation.Error
+	row.CorruptionClass = validation.CorruptionClass
+	row.EmptyOutput = validation.EmptyOutput
+	row.TruncationDetected = validation.TruncationDetected
+	row.NIAHDepth = validation.NIAHDepth
+	row.NIAHPass = validation.NIAHPass
+	if session != nil {
+		state := "partial"
+		switch validation.Status {
+		case validationPassed:
+			state = "pass"
+		case validationFailed:
+			state = "fail"
+		case validationSkipped:
+			state = "pending"
+		case validationScaffolded:
+			state = "partial"
+		}
+		session.SetValidation(string(validation.Kind), state)
+		session.SetValidationResult(validation.CorruptionClass, validation.TruncationDetected)
+	}
 	if validation.Kind == validationDecodeCorruptionGuard || validation.Kind == validationPromptFileRegression {
 		row.ValidationCorruptionMarks = strings.Join(detectCorruptionMarkers(validation.Observed), ",")
 	}
@@ -665,119 +769,146 @@ func withOptionalTimeout(ctx context.Context, timeout time.Duration) (context.Co
 
 func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 	agg := epochAggregate{
-		Host:                      rows[0].Host,
-		HostLabel:                 rows[0].HostLabel,
-		ServerVersion:             rows[0].ServerVersion,
-		Model:                     rows[0].Model,
-		ModelFamily:               rows[0].ModelFamily,
-		ModelArch:                 rows[0].ModelArch,
-		ModelSizeLabel:            rows[0].ModelSizeLabel,
-		Quant:                     rows[0].Quant,
-		KVModeRequested:           rows[0].KVModeRequested,
-		KVModeRequestedK:          rows[0].KVModeRequestedK,
-		KVModeRequestedV:          rows[0].KVModeRequestedV,
-		RequestedCacheTypeK:       rows[0].RequestedCacheTypeK,
-		RequestedCacheTypeV:       rows[0].RequestedCacheTypeV,
-		RequestedMode:             rows[0].RequestedMode,
-		EffectiveMode:             rows[0].EffectiveMode,
-		KVBackendRequested:        rows[0].KVBackendRequested,
-		KVAlgoResolved:            rows[0].KVAlgoResolved,
-		KVAlgoResolvedK:           rows[0].KVAlgoResolvedK,
-		KVAlgoResolvedV:           rows[0].KVAlgoResolvedV,
-		KVPathK:                   rows[0].KVPathK,
-		KVPathV:                   rows[0].KVPathV,
-		KVSymmetric:               rows[0].KVSymmetric,
-		KVAsymmetric:              rows[0].KVAsymmetric,
-		SymmetricRequested:        rows[0].SymmetricRequested,
-		SymmetricEffective:        rows[0].SymmetricEffective,
-		FallbackApplied:           rows[0].FallbackApplied,
-		KOnlyFallback:             rows[0].KOnlyFallback,
-		FallbackReason:            rows[0].FallbackReason,
-		TurboQuantPathKind:        rows[0].TurboQuantPathKind,
-		PathKind:                  rows[0].PathKind,
-		NativeTurboQuantActive:    rows[0].NativeTurboQuantActive,
-		ReferenceTurboQuantActive: rows[0].ReferenceTurboQuantActive,
-		FlashAttentionRequested:   rows[0].FlashAttentionRequested,
-		FlashAttentionEffective:   rows[0].FlashAttentionEffective,
-		FAEnabled:                 rows[0].FAEnabled,
-		FARequiredForVTurbo:       rows[0].FARequiredForVTurbo,
-		VTurboSupported:           rows[0].VTurboSupported,
-		DetectedHeadDim:           rows[0].DetectedHeadDim,
-		ArchitectureClass:         rows[0].ArchitectureClass,
-		SupportTier:               rows[0].SupportTier,
-		HybridKVArchitecture:      rows[0].HybridKVArchitecture,
-		TQBlockSize:               rows[0].TQBlockSize,
-		GPUStatsSource:            rows[0].GPUStatsSource,
-		HostStatsSource:           rows[0].HostStatsSource,
-		ValidationKind:            rows[0].ValidationKind,
-		ValidationStatus:          rows[0].ValidationStatus,
-		ValidationObserved:        rows[0].ValidationObserved,
-		ValidationExpected:        rows[0].ValidationExpected,
-		ValidationError:           rows[0].ValidationError,
-		RequestedNumCtx:           rows[0].RequestedNumCtx,
-		AttemptedNumCtx:           rows[0].AttemptedNumCtx,
-		EffectiveNumCtx:           rows[0].EffectiveNumCtx,
-		ContextRequested:          rows[0].ContextRequested,
-		ContextEffective:          rows[0].ContextEffective,
-		RequestedContextTopRung:   rows[0].RequestedContextTopRung,
-		ContextLadderIndex:        rows[0].ContextLadderIndex,
-		ContextFallbackReason:     rows[0].ContextFallbackReason,
-		ContextFallbackDetail:     rows[0].ContextFallbackDetail,
-		ContextFallbackStage:      rows[0].ContextFallbackStage,
-		ContextFallbackClass:      rows[0].ContextFallbackClass,
-		LadderRejectedRungs:       rows[0].LadderRejectedRungs,
-		ModelFileSizeBytes:        rows[0].ModelFileSizeBytes,
-		EstimatedKVFootprintBytes: rows[0].EstimatedKVFootprintBytes,
-		KVBufferBytesEstimate:     rows[0].KVBufferBytesEstimate,
-		VisibleGPUCount:           rows[0].VisibleGPUCount,
-		PerGPUVRAMGiB:             rows[0].PerGPUVRAMGiB,
-		TotalVisibleVRAMBytes:     rows[0].TotalVisibleVRAMBytes,
-		ProcessVRAMBytes:          rows[0].ProcessVRAMBytes,
-		GPUVRAMUsedBytes:          rows[0].GPUVRAMUsedBytes,
-		GPUVRAMFreeBytes:          rows[0].GPUVRAMFreeBytes,
-		PeakHostRAMDeltaBytes:     rows[0].PeakHostRAMDeltaBytes,
-		HostRAMBeforeBytes:        rows[0].HostRAMBeforeBytes,
-		HostRAMAfterLoadBytes:     rows[0].HostRAMAfterLoadBytes,
-		HostRAMAfterPrefillBytes:  rows[0].HostRAMAfterPrefillBytes,
-		HostRAMAfterDecodeBytes:   rows[0].HostRAMAfterDecodeBytes,
-		UsedHostAssist:            rows[0].UsedHostAssist,
-		UsedMMap:                  rows[0].UsedMMap,
-		UsedCPUAssist:             rows[0].UsedCPUAssist,
-		LongContextCapSource:      rows[0].LongContextCapSource,
-		NativeContextAdvertised:   rows[0].NativeContextAdvertised,
-		YarnContextAdvertised:     rows[0].YarnContextAdvertised,
-		ValidationCorruptionMarks: rows[0].ValidationCorruptionMarks,
-		FitStatus:                 rows[0].FitStatus,
-		CorruptionStatus:          rows[0].CorruptionStatus,
-		CorrectnessStatus:         rows[0].CorrectnessStatus,
-		ResidencyKind:             rows[0].ResidencyKind,
-		Notes:                     rows[0].Notes,
-		Workload:                  rows[0].Workload,
-		NumCtx:                    rows[0].NumCtx,
-		PromptTokensTarget:        rows[0].PromptTokensTarget,
-		MaxTokens:                 rows[0].MaxTokens,
-		PromptTokens:              rows[0].PromptTokens,
-		CtxXConc:                  rows[0].CtxXConc,
-		Concurrency:               rows[0].Concurrency,
-		Epoch:                     rows[0].Epoch,
-		Warmup:                    rows[0].Warmup,
-		PeakVRAMBytes:             rows[0].PeakVRAMBytes,
-		AvgGPUUtil:                rows[0].AvgGPUUtil,
-		PeakGPUUtil:               rows[0].PeakGPUUtil,
-		GPUMetricsAvailable:       rows[0].GPUMetricsAvailable,
-		HostRAMUsedBytes:          rows[0].HostRAMUsedBytes,
-		PeakHostRAMBytes:          rows[0].PeakHostRAMBytes,
-		HostMetricsAvailable:      rows[0].HostMetricsAvailable,
-		FullGPUResidency:          rows[0].FullGPUResidency,
-		GPUOffloadRegression:      rows[0].GPUOffloadRegression,
-		ProcessorStateBefore:      rows[0].ProcessorStateBefore,
-		ProcessorStateAfter:       rows[0].ProcessorStateAfter,
-		Spilled:                   rows[0].Spilled,
-		RunnerRSSBytes:            rows[0].RunnerRSSBytes,
-		Status:                    statusOK,
-		Success:                   boolPtr(true),
-		WallMS:                    float64(wall) / float64(time.Millisecond),
-		WallTimeS:                 float64(wall) / float64(time.Second),
+		Host:                            rows[0].Host,
+		HostLabel:                       rows[0].HostLabel,
+		ServerVersion:                   rows[0].ServerVersion,
+		Model:                           rows[0].Model,
+		ModelFamily:                     rows[0].ModelFamily,
+		ModelArch:                       rows[0].ModelArch,
+		ModelSizeLabel:                  rows[0].ModelSizeLabel,
+		Quant:                           rows[0].Quant,
+		KVModeRequested:                 rows[0].KVModeRequested,
+		KVModeRequestedK:                rows[0].KVModeRequestedK,
+		KVModeRequestedV:                rows[0].KVModeRequestedV,
+		RequestedCacheTypeK:             rows[0].RequestedCacheTypeK,
+		RequestedCacheTypeV:             rows[0].RequestedCacheTypeV,
+		RequestedMode:                   rows[0].RequestedMode,
+		EffectiveMode:                   rows[0].EffectiveMode,
+		KVBackendRequested:              rows[0].KVBackendRequested,
+		KVAlgoResolved:                  rows[0].KVAlgoResolved,
+		KVAlgoResolvedK:                 rows[0].KVAlgoResolvedK,
+		KVAlgoResolvedV:                 rows[0].KVAlgoResolvedV,
+		KVPathK:                         rows[0].KVPathK,
+		KVPathV:                         rows[0].KVPathV,
+		KVSymmetric:                     rows[0].KVSymmetric,
+		KVAsymmetric:                    rows[0].KVAsymmetric,
+		SymmetricRequested:              rows[0].SymmetricRequested,
+		SymmetricEffective:              rows[0].SymmetricEffective,
+		FallbackApplied:                 rows[0].FallbackApplied,
+		KOnlyFallback:                   rows[0].KOnlyFallback,
+		FallbackReason:                  rows[0].FallbackReason,
+		TurboQuantPathKind:              rows[0].TurboQuantPathKind,
+		PathKind:                        rows[0].PathKind,
+		NativeTurboQuantActive:          rows[0].NativeTurboQuantActive,
+		ReferenceTurboQuantActive:       rows[0].ReferenceTurboQuantActive,
+		FlashAttentionRequested:         rows[0].FlashAttentionRequested,
+		FlashAttentionEffective:         rows[0].FlashAttentionEffective,
+		FAEnabled:                       rows[0].FAEnabled,
+		FARequiredForVTurbo:             rows[0].FARequiredForVTurbo,
+		VTurboSupported:                 rows[0].VTurboSupported,
+		DetectedHeadDim:                 rows[0].DetectedHeadDim,
+		ArchitectureClass:               rows[0].ArchitectureClass,
+		SupportTier:                     rows[0].SupportTier,
+		HybridKVArchitecture:            rows[0].HybridKVArchitecture,
+		TQBlockSize:                     rows[0].TQBlockSize,
+		VReconstructionComputeDType:     rows[0].VReconstructionComputeDType,
+		SegmentedHeadActive:             rows[0].SegmentedHeadActive,
+		SegmentedHeadPlan:               rows[0].SegmentedHeadPlan,
+		AttentionSurfacePolicyRequested: rows[0].AttentionSurfacePolicyRequested,
+		AttentionSurfacePolicyEffective: rows[0].AttentionSurfacePolicyEffective,
+		AttentionSurfacePolicy:          rows[0].AttentionSurfacePolicy,
+		AttentionSurfaceBehavior:        rows[0].AttentionSurfaceBehavior,
+		AttentionSurfaceOverrideApplied: rows[0].AttentionSurfaceOverrideApplied,
+		AttentionSurfaceOverrideReason:  rows[0].AttentionSurfaceOverrideReason,
+		AttentionSurfaceClasses:         rows[0].AttentionSurfaceClasses,
+		QJLKRequested:                   rows[0].QJLKRequested,
+		QJLKEffective:                   rows[0].QJLKEffective,
+		QJLVRequested:                   rows[0].QJLVRequested,
+		QJLVEffective:                   rows[0].QJLVEffective,
+		QJLKEnabled:                     rows[0].QJLKEnabled,
+		QJLVEnabled:                     rows[0].QJLVEnabled,
+		ResidualTailTokens:              rows[0].ResidualTailTokens,
+		ExperimentalWeightQuantization:  rows[0].ExperimentalWeightQuantization,
+		ExperimentalWeightQuantPolicy:   rows[0].ExperimentalWeightQuantPolicy,
+		ExperimentalWeightQuantSource:   rows[0].ExperimentalWeightQuantSource,
+		ExperimentalWeightQuantActive:   rows[0].ExperimentalWeightQuantActive,
+		GPUStatsSource:                  rows[0].GPUStatsSource,
+		HostStatsSource:                 rows[0].HostStatsSource,
+		ValidationKind:                  rows[0].ValidationKind,
+		ValidationStatus:                rows[0].ValidationStatus,
+		ValidationObserved:              rows[0].ValidationObserved,
+		ValidationExpected:              rows[0].ValidationExpected,
+		ValidationError:                 rows[0].ValidationError,
+		RequestedNumCtx:                 rows[0].RequestedNumCtx,
+		AttemptedNumCtx:                 rows[0].AttemptedNumCtx,
+		EffectiveNumCtx:                 rows[0].EffectiveNumCtx,
+		ContextRequested:                rows[0].ContextRequested,
+		ContextEffective:                rows[0].ContextEffective,
+		RequestedContextTopRung:         rows[0].RequestedContextTopRung,
+		ContextLadderIndex:              rows[0].ContextLadderIndex,
+		ContextFallbackReason:           rows[0].ContextFallbackReason,
+		ContextFallbackDetail:           rows[0].ContextFallbackDetail,
+		ContextFallbackStage:            rows[0].ContextFallbackStage,
+		ContextFallbackClass:            rows[0].ContextFallbackClass,
+		LadderRejectedRungs:             rows[0].LadderRejectedRungs,
+		ModelFileSizeBytes:              rows[0].ModelFileSizeBytes,
+		EstimatedKVFootprintBytes:       rows[0].EstimatedKVFootprintBytes,
+		KVBufferBytesEstimate:           rows[0].KVBufferBytesEstimate,
+		VisibleGPUCount:                 rows[0].VisibleGPUCount,
+		PerGPUVRAMGiB:                   rows[0].PerGPUVRAMGiB,
+		TotalVisibleVRAMBytes:           rows[0].TotalVisibleVRAMBytes,
+		ProcessVRAMBytes:                rows[0].ProcessVRAMBytes,
+		GPUVRAMUsedBytes:                rows[0].GPUVRAMUsedBytes,
+		GPUVRAMFreeBytes:                rows[0].GPUVRAMFreeBytes,
+		PeakHostRAMDeltaBytes:           rows[0].PeakHostRAMDeltaBytes,
+		HostRAMBeforeBytes:              rows[0].HostRAMBeforeBytes,
+		HostRAMAfterLoadBytes:           rows[0].HostRAMAfterLoadBytes,
+		HostRAMAfterPrefillBytes:        rows[0].HostRAMAfterPrefillBytes,
+		HostRAMAfterDecodeBytes:         rows[0].HostRAMAfterDecodeBytes,
+		UsedHostAssist:                  rows[0].UsedHostAssist,
+		UsedMMap:                        rows[0].UsedMMap,
+		UsedCPUAssist:                   rows[0].UsedCPUAssist,
+		LongContextCapSource:            rows[0].LongContextCapSource,
+		NativeContextAdvertised:         rows[0].NativeContextAdvertised,
+		YarnContextAdvertised:           rows[0].YarnContextAdvertised,
+		ValidationCorruptionMarks:       rows[0].ValidationCorruptionMarks,
+		FitStatus:                       rows[0].FitStatus,
+		CorruptionStatus:                rows[0].CorruptionStatus,
+		CorruptionClass:                 rows[0].CorruptionClass,
+		CorrectnessStatus:               rows[0].CorrectnessStatus,
+		KLDivergenceVsBaseline:          rows[0].KLDivergenceVsBaseline,
+		NIAHDepth:                       rows[0].NIAHDepth,
+		NIAHPass:                        rows[0].NIAHPass,
+		EmptyOutput:                     rows[0].EmptyOutput,
+		TruncationDetected:              rows[0].TruncationDetected,
+		ResidencyKind:                   rows[0].ResidencyKind,
+		Notes:                           rows[0].Notes,
+		Workload:                        rows[0].Workload,
+		NumCtx:                          rows[0].NumCtx,
+		PromptTokensTarget:              rows[0].PromptTokensTarget,
+		MaxTokens:                       rows[0].MaxTokens,
+		PromptTokens:                    rows[0].PromptTokens,
+		CtxXConc:                        rows[0].CtxXConc,
+		Concurrency:                     rows[0].Concurrency,
+		Epoch:                           rows[0].Epoch,
+		Warmup:                          rows[0].Warmup,
+		PeakVRAMBytes:                   rows[0].PeakVRAMBytes,
+		AvgGPUUtil:                      rows[0].AvgGPUUtil,
+		PeakGPUUtil:                     rows[0].PeakGPUUtil,
+		GPUMetricsAvailable:             rows[0].GPUMetricsAvailable,
+		HostRAMUsedBytes:                rows[0].HostRAMUsedBytes,
+		PeakHostRAMBytes:                rows[0].PeakHostRAMBytes,
+		HostMetricsAvailable:            rows[0].HostMetricsAvailable,
+		FullGPUResidency:                rows[0].FullGPUResidency,
+		GPUOffloadRegression:            rows[0].GPUOffloadRegression,
+		ProcessorStateBefore:            rows[0].ProcessorStateBefore,
+		ProcessorStateAfter:             rows[0].ProcessorStateAfter,
+		Spilled:                         rows[0].Spilled,
+		RunnerRSSBytes:                  rows[0].RunnerRSSBytes,
+		Status:                          statusOK,
+		Success:                         boolPtr(true),
+		WallMS:                          float64(wall) / float64(time.Millisecond),
+		WallTimeS:                       float64(wall) / float64(time.Second),
 	}
 	var ttfts []float64
 	var kvResolved []string
@@ -954,6 +1085,116 @@ func aggregateEpoch(rows []workerResult, wall time.Duration) epochAggregate {
 	agg.GPUVRAMUsedBytes = firstNonEmptyInt64(agg.PeakVRAMBytes, agg.GPUVRAMUsedBytes)
 	agg.GPUVRAMFreeBytes = computeGPUVRAMFree(agg.TotalVisibleVRAMBytes, agg.GPUVRAMUsedBytes)
 	return agg
+}
+
+func nextTestIndex(counter *int) int {
+	if counter == nil {
+		return 0
+	}
+	*counter = *counter + 1
+	return *counter
+}
+
+func createLiveSession(live *liveManager, cfg config, cell sweepCell, testIndex, testTotal, epoch, epochTotal, repeat, repeatTotal, ladderPosition, ladderTotal int) *liveSession {
+	if live == nil {
+		return nil
+	}
+	session, err := newLiveSession(live, liveSessionOptions{
+		Suite:               cfg.Profile,
+		TestID:              fmt.Sprintf("%s-%s-%s-%d-%d-%d", cell.Host.Label, cell.KVMode, cell.Workload.Name, cell.Workload.NumCtx, epoch, testIndex),
+		TestIndex:           testIndex,
+		TestTotal:           testTotal,
+		Host:                cell.Host.BaseURL,
+		HostLabel:           cell.Host.Label,
+		Model:               cfg.Model,
+		Workload:            string(cell.Workload.Name),
+		RequestedKVMode:     cell.KVMode,
+		RequestedCacheTypeK: splitRequestedCacheType(cell.KVMode, true),
+		RequestedCacheTypeV: splitRequestedCacheType(cell.KVMode, false),
+		RequestedContext:    cell.Workload.NumCtx,
+		FARequested:         cell.FARequested,
+		LadderPosition:      ladderPosition,
+		LadderTotal:         ladderTotal,
+		Epoch:               epoch,
+		EpochTotal:          epochTotal,
+		Repeat:              repeat,
+		RepeatTotal:         repeatTotal,
+		Timeout:             cfg.Timeout,
+		PromptTarget:        cell.Workload.PromptTokensTarget,
+		MaxTokens:           cell.Workload.MaxTokens,
+		DisplayEnabled:      cfg.LiveStatusMode != progressOff,
+	})
+	if err != nil {
+		return nil
+	}
+	return session
+}
+
+func applyLiveSummaryToWorker(row *workerResult, summary liveSessionSummary) {
+	row.TelemetryPathJSONL = summary.TelemetryPath
+	row.PeakGPUVRAMBytesTotal = summary.PeakGPUVRAMBytesTotal
+	row.PeakGPUVRAMBytesByGPU = summary.PeakGPUVRAMBytesByGPU
+	row.AvgPromptTPS = summary.AvgPromptTPS
+	row.AvgDecodeTPS = summary.AvgDecodeTPS
+	row.MaxPromptTPS = summary.MaxPromptTPS
+	row.MaxDecodeTPS = summary.MaxDecodeTPS
+	row.ETAConfidence = summary.ETAConfidence
+	row.StageDurations = summary.StageDurations
+	row.ProgressSamples = summary.ProgressSamples
+	row.LiveStatusEnabled = summary.LiveStatusEnabled
+	row.TelemetrySamplingIntervalSec = summary.TelemetrySamplingSec
+}
+
+func applyLiveSummaryToAggregate(row *epochAggregate, summary liveSessionSummary) {
+	row.TelemetryPathJSONL = summary.TelemetryPath
+	row.PeakGPUVRAMBytesTotal = summary.PeakGPUVRAMBytesTotal
+	row.PeakGPUVRAMBytesByGPU = summary.PeakGPUVRAMBytesByGPU
+	row.AvgPromptTPS = summary.AvgPromptTPS
+	row.AvgDecodeTPS = summary.AvgDecodeTPS
+	row.MaxPromptTPS = summary.MaxPromptTPS
+	row.MaxDecodeTPS = summary.MaxDecodeTPS
+	row.ETAConfidence = summary.ETAConfidence
+	row.StageDurations = summary.StageDurations
+	row.ProgressSamples = summary.ProgressSamples
+	row.LiveStatusEnabled = summary.LiveStatusEnabled
+	row.TelemetrySamplingIntervalSec = summary.TelemetrySamplingSec
+}
+
+func approxGeneratedTokens(parts ...string) int {
+	total := 0
+	for _, part := range parts {
+		total += len(strings.Fields(strings.TrimSpace(part)))
+	}
+	return total
+}
+
+func validationKindForWorkload(name workloadName) validationKind {
+	switch name {
+	case workloadDecodeCorruption:
+		return validationDecodeCorruptionGuard
+	case workloadPromptFileRegress:
+		return validationPromptFileRegression
+	case workloadAgenticStructured:
+		return validationStructuredOutput
+	case workloadLongContextRecall:
+		return validationLongContextRecall
+	case workloadNIAHRetrieval:
+		return validationNIAHRetrieval
+	case workloadLongJSONRetention:
+		return validationLongJSONRetention
+	case workloadFitCeiling:
+		return validationFitCeiling
+	default:
+		return validationRecallDistance
+	}
+}
+
+func splitRequestedCacheType(mode string, keySide bool) string {
+	k, v, _ := splitBenchmarkKVMode(mode)
+	if keySide {
+		return k
+	}
+	return v
 }
 
 func requestedKVBackend(kvMode string) string {
@@ -1144,7 +1385,7 @@ func applyDerivedStatuses(row *workerResult) {
 		} else {
 			row.FitStatus = string(tqbenchschema.FitStatusFit)
 		}
-		if strings.TrimSpace(row.ValidationCorruptionMarks) != "" {
+		if strings.TrimSpace(row.ValidationCorruptionMarks) != "" || strings.TrimSpace(row.CorruptionClass) != "" || row.EmptyOutput || row.TruncationDetected {
 			row.CorruptionStatus = string(tqbenchschema.CorruptionStatusFail)
 			row.CorrectnessStatus = string(tqbenchschema.CorrectnessStatusFail)
 		} else {
@@ -1168,6 +1409,18 @@ func applyDerivedStatuses(row *workerResult) {
 	}
 	if row.ValidationError != "" {
 		notes = append(notes, row.ValidationError)
+	}
+	if row.CorruptionClass != "" {
+		notes = append(notes, "corruption_class="+row.CorruptionClass)
+	}
+	if row.ResidualTailTokens > 0 {
+		notes = append(notes, fmt.Sprintf("residual_tail_tokens=%d", row.ResidualTailTokens))
+	}
+	if row.SegmentedHeadActive {
+		notes = append(notes, "segmented_head_plan="+firstNonEmpty(row.SegmentedHeadPlan, "active"))
+	}
+	if row.AttentionSurfaceOverrideApplied {
+		notes = append(notes, "surface_override="+firstNonEmpty(row.AttentionSurfaceOverrideReason, row.AttentionSurfacePolicy))
 	}
 	if row.ResidencyKind != "" {
 		notes = append(notes, "residency="+row.ResidencyKind)
