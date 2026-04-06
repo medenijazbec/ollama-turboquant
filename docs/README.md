@@ -21,3 +21,6 @@
 * [Troubleshooting Guide](https://docs.ollama.com/troubleshooting)
 * [FAQ](https://docs.ollama.com/faq#faq)
 * [Development guide](./development.md)
+* [TurboQuant](./turboquant.mdx)
+* [KV Stress Bench](./kvstress-bench.md)
+* [TurboQuant Native Port Checkpoints](./turboquant-native-port/README.md)

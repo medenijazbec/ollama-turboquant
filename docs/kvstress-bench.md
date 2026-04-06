@@ -15,6 +15,10 @@
 - max stable context and concurrency before spill or failure
 - actual runtime KV path as reported by the server
 - actual runtime TurboQuant algorithm resolution (`kv_algo_resolved`)
+- requested vs effective QJL flags
+- residual-tail A/B rows on long-context profiles
+- sparse KLD vs baseline when score-route logprobs overlap sufficiently
+- NIAH retrieval pass/fail and corruption-class reporting
 
 `--timeout 0` means unlimited runtime for preflight, prompt calibration, and benchmark epochs.
 
@@ -90,6 +94,7 @@ kvstress-bench \
 - `quick`: `8k/16k`, concurrency `1/2`, `3` timed epochs
 - `full`: `8k/16k/32k/64k`, concurrency `1/2/4`, `6` timed epochs
 - `staircase`: convenience staircase preset
+- `large-context`: descending long-context ladder with paired `residual_tail_tokens=0` and `128` rows unless explicitly overridden
 
 ## Legacy Host Compatibility
 
@@ -127,18 +132,17 @@ kvstress-bench \
   --profile impact
 ```
 
-## Docker Compose Flow
+## Host-Shell Flow
 
 ```bash
-cd /srv/share/ollama-benchmark/ollama-main-turboquant
+cd /path/to/ollama-main-turboquant
 
-docker compose -f docker-compose.sm52-turboquant.yml down
-docker compose -f docker-compose.sm52-turboquant.yml build --no-cache --pull
-docker compose -f docker-compose.sm52-turboquant.yml up -d --force-recreate --remove-orphans
-
-docker compose -f docker-compose.ollama-bench.yml down
-docker compose -f docker-compose.ollama-bench.yml build --no-cache --pull
-docker compose -f docker-compose.ollama-bench.yml up -d --force-recreate --remove-orphans
+bash ./scripts/run-base-minimal-test-matrix.sh
+bash ./scripts/run-turbo-minimal-test-matrix.sh
+bash ./scripts/run-ab-minimal-test-matrix.sh
+bash ./scripts/run-ab-ppl.sh
+bash ./scripts/run-ab-agentic.sh
+bash ./scripts/run-ab-full-large-context.sh
 ```
 
 ## How To Read Results
@@ -152,6 +156,13 @@ docker compose -f docker-compose.ollama-bench.yml up -d --force-recreate --remov
 - `spilled`: mixed CPU/GPU residency; valid for capacity and spill summaries, excluded from full-GPU speed claims
 - `kv_path`: actual runtime path from the server
 - `kv_algo_resolved`: must be `paper` for valid `tq25` / `tq35` benchmark rows
+- `qjl_k_requested` / `qjl_k_effective`: whether the experimental K-side QJL lane was actually used
+- `qjl_v_requested` / `qjl_v_effective`: V-side QJL requests should remain false/effective false in this checkout
+- `v_reconstruction_compute_dtype`: supported V TurboQuant rows should report `fp32`
+- `residual_tail_tokens`: compare `0` vs `128` on long-context profiles
+- `niah_depth` / `niah_pass`: exact retrieval check under context pressure
+- `corruption_class`: distinguishes empty output, punctuation repetition, malformed JSON, truncation, and other corruption-style failures
+- `kl_divergence_vs_baseline`: sparse KLD if token-logprob overlap is sufficient
 - `status=unsupported`: host cannot run that KV mode; skip it in performance claims
 - `status=failed`: request or epoch failed; inspect `error`
 - `success` is tri-state: `true`, `false`, or empty/null for unsupported
@@ -169,3 +180,4 @@ If `kv_path` is `dense-fallback`, that means TurboQuant may have been requested,
 - Use Flash Attention where required for quantized KV modes.
 - Bigger differences should appear at `16k+` context and/or concurrency `>1`.
 - GGUF weight quantization such as `Q4_K_M` is separate from KV cache mode.
+- Experimental weight quantization fields are scaffold-only metadata in this checkout and do not indicate active model-weight compression.

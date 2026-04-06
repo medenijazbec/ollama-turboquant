@@ -4,51 +4,59 @@ title: TurboQuant
 
 TurboQuant is Ollama's compressed KV-cache path for the new engine. It reduces KV memory growth during long-context generation without changing the model's GGUF weight quantization.
 
-In this branch, `tq25` and `tq35` now resolve to the paper-faithful TurboQuant path by default:
+## Stable Default Lane
 
-- deterministic random orthogonal rotation
-- scalar Lloyd-Max quantization in the rotated basis
-- key-side 1-bit QJL residual correction for inner-product scoring
-- value-side MSE quantization only
+In this checkout, the stable TurboQuant lane is:
 
-TurboQuant is KV-cache compression only.
+- structured WHT/Hadamard-style rotation
+- scalar Lloyd-Max / MSE-style quantization
+- QJL off by default on both K and V for new encodes
+- FP32 V-side reconstruction on every supported path
+
+TurboQuant is KV-cache compression only. Experimental weight-quantization metadata exists separately and does not currently apply active model-weight compression.
 
 ## Status
 
 This branch currently exposes:
 
 - `reference_wrapper`: the paper-faithful codec and Go-side wrapper cache path
-- `native_backend`: the native-engine migration lane, introduced incrementally with explicit guards and status reporting
-- `experimental` lanes: `tq25`, hybrid/native rollout work, and future `turbo4` or adaptive/per-layer ideas remain guarded
+- `native_backend`: the native-engine migration lane, with explicit guards and status reporting
+- `experimental` lanes: segmented `head_dim=576`, K-side QJL, residual FP16 tail, and surface-aware policy handling
+- `scaffold-only` lane: experimental weight quantization metadata with `experimental_weight_quant_active=false`
 
-Wrapper-mode runs are still the reference lane. Do not treat them as proof of backend-native KV memory savings until the backend owns the packed KV payload directly.
+Wrapper-mode runs remain the reference lane. Do not treat them as proof of backend-native KV memory savings until the backend owns the packed KV payload directly.
+
+## Fully Supported vs Experimental
+
+Fully supported in this checkout:
+
+- stable `tq35` / `tq25` request handling with QJL off by default
+- FP32 V reconstruction on supported paths
+- runtime requested vs effective K/V metadata
+- sparse KLD, NIAH, corruption classification, and residual-tail reporting in the benchmark harness
+
+Experimental:
+
+- K-side QJL via `turboquant_qjl_k=true`
+- segmented `head_dim=576` via `turboquant_allow_segmented_heads=true`
+- residual FP16 tail via `turboquant_residual_tail_tokens`
+- surface-aware policy reporting and conservative whole-model fallback for hybrid/SWA models
+
+Blocked or scaffold-only:
+
+- `turboquant_qjl_v=true` is blocked and reported as fallback
+- experimental weight quantization is metadata-only and remains inactive
+- arbitrary non-power-of-two head dimensions are not enabled beyond `576 -> 256+256+64`
 
 ## Rollout Presets
 
 This branch does not recommend one universal TurboQuant mode. Use the support tier and runtime metadata to pick a rollout lane:
 
 - `safe`: recommend symmetric `tq35/tq35` on the primary validated architecture families and `support_tier=safe`
-- `conservative`: recommend `q8_0-K + tq35-V` only where the runtime still reports V-side TurboQuant support and no fallback
-- `experimental`: `tq25`, `tq4` aliases, adaptive/per-layer K ideas, and native-migration paths stay behind explicit warnings
+- `conservative`: recommend asymmetric pairings only where the runtime still reports the requested effective K/V path with no fallback
+- `experimental`: segmented heads, K-side QJL, residual tails, and hybrid/native rollout work remain guarded
 
 Current conservative guidance is intentionally narrow. Some asymmetric pairings still fail production-style correctness checks, so pairings outside the validated set should be treated as experimental even if they run.
-
-## Recommended Pairings
-
-Validated recommendation set in this branch:
-
-- `tq35/tq35` on supported `safe` architecture families
-- `q8_0-K + tq35-V` as the only first-class conservative asymmetric pairing, and only when runtime FA/path support keeps V in TurboQuant instead of falling back
-
-Guarded or experimental-only pairings:
-
-- `tq25/tq25`
-- `tq25/tq35` or `tq35/tq25`
-- arbitrary asymmetric mixes such as `q4_0-K + tq35-V`
-- `tq4` / `turbo4` aliases
-- adaptive/per-layer K compression
-
-Those modes may still be useful for investigation, but this branch does not describe them as production-safe recommendations.
 
 ## What Is Implemented
 
@@ -62,12 +70,25 @@ This branch includes:
   - `kv_mode_resolved`
   - `kv_algo_resolved`
   - `kv_cache_path`
+  - `v_reconstruction_compute_dtype`
+  - `segmented_head_active`
+  - `segmented_head_plan`
+  - `attention_surface_policy_requested`
+  - `attention_surface_policy_effective`
+  - `attention_surface_behavior`
+  - `qjl_k_requested`
+  - `qjl_k_effective`
+  - `qjl_v_requested`
+  - `qjl_v_effective`
+  - `residual_tail_tokens`
+  - `experimental_weight_quantization`
+  - `experimental_weight_quant_active`
 
 ## Where It Lives
 
 - `turboquant/`: codec, packing, decode, scoring helpers
 - `kvcache/turboquant.go`: KV cache storage, fallback decode, compressed-K handoff
-- `runner/ollamarunner/cache.go`: TurboQuant cache selection for `tq25` and `tq35`
+- `runner/ollamarunner/cache.go`: TurboQuant cache selection and runtime truth reporting
 - `llm/server.go`: KV mode resolution, normalization, and request/env precedence
 - `ml/backend/ggml/ggml.go`: CPU fast path and fallback selection
 - `docs/turboquant_paper_design.md`: paper-fidelity note and scope boundaries
@@ -122,7 +143,33 @@ Asymmetric overrides are also supported:
 }
 ```
 
-The runtime reports the resolved mode and algorithm in the final response metrics:
+Experimental K-side QJL:
+
+```json
+{
+  "model": "gemma3",
+  "prompt": "Explain TurboQuant.",
+  "options": {
+    "kv_cache_type": "tq35",
+    "turboquant_qjl_k": true
+  }
+}
+```
+
+Experimental residual tail:
+
+```json
+{
+  "model": "gemma3",
+  "prompt": "Explain TurboQuant.",
+  "options": {
+    "kv_cache_type": "tq35",
+    "turboquant_residual_tail_tokens": 128
+  }
+}
+```
+
+The runtime reports the resolved mode and advanced diagnostics in the final response metrics:
 
 - `resolved_kv_cache_type`
 - `resolved_kv_cache_type_k`
@@ -143,6 +190,21 @@ The runtime reports the resolved mode and algorithm in the final response metric
 - `preset_warning`
 - `pairing_validated`
 - `experimental_lane`
+- `v_reconstruction_compute_dtype`
+- `segmented_head_active`
+- `segmented_head_plan`
+- `attention_surface_policy_requested`
+- `attention_surface_policy_effective`
+- `attention_surface_behavior`
+- `qjl_k_requested`
+- `qjl_k_effective`
+- `qjl_v_requested`
+- `qjl_v_effective`
+- `residual_tail_tokens`
+- `experimental_weight_quantization`
+- `experimental_weight_quant_policy`
+- `experimental_weight_quant_source`
+- `experimental_weight_quant_active`
 
 Use the effective K/V mode and these runtime fields for comparisons. If requested and effective modes differ, the effective mode is the truth for rollout and benchmark claims.
 
@@ -175,50 +237,20 @@ If neither the request nor the model specifies a KV mode, Ollama falls back to `
 
 `OLLAMA_TURBOQUANT_PRESET` can be set to `safe`, `conservative`, or `experimental` to drive rollout guidance and warnings without changing the actual requested K/V types.
 
-## Mode Precedence
-
-The effective KV cache mode is resolved in this order:
-
-1. request side-specific override: `--cache-type-k`, `--cache-type-v`, `options.kv_cache_type_k`, `options.kv_cache_type_v`
-2. request shorthand: `--turboquant` or `options.kv_cache_type`
-3. model default: `PARAMETER kv_cache_type ...`
-4. environment: `OLLAMA_KV_CACHE_TYPE_K`, `OLLAMA_KV_CACHE_TYPE_V`, then `OLLAMA_KV_CACHE_TYPE`
-5. implicit default: `f16/f16`
+`OLLAMA_TURBOQUANT_QJL_K`, `OLLAMA_TURBOQUANT_QJL_V`, `OLLAMA_TURBOQUANT_RESIDUAL_TAIL_TOKENS`, `OLLAMA_TURBOQUANT_ALLOW_SEGMENTED_HEADS`, and `OLLAMA_TURBOQUANT_SURFACE_POLICY` control the experimental request-time lane.
 
 ## Compatibility And Limitations
 
 - TurboQuant applies to generation and chat paths only.
 - The legacy llama runner still rejects TurboQuant modes.
 - TurboQuant modes require the new engine path.
-- Quantized KV modes require flash attention support.
+- Quantized KV modes may require Flash Attention support depending on the effective K/V pairing.
 - `reference_wrapper` remains the stable comparison lane for this branch.
-- `native_grouped_scaffold` and `native_backend` should not be assumed wire-compatible across distributed/RPC boundaries unless both ends match layout kind, layout version, and path semantics.
-- `turbo4` and adaptive/per-layer K work are not promoted to production-ready guidance in this branch.
-
-## Local Test Lanes
-
-For local Windows development, prefer the curated test lanes instead of `go test ./...`.
-
-Default core lane:
-
-```powershell
-pwsh scripts/test_turboquant_local.ps1
-```
-
-Include platform-gated packages:
-
-```powershell
-pwsh scripts/test_turboquant_local.ps1 -IncludePlatformGated
-```
-
-Lane summary:
-
-- Lane A: `./api`, `./cmd/bench`, `./cmd/benchkv`, `./turboquant`
-- Lane B: `./cmd`, `./runner/ollamarunner`, `./llm`, `./ml/backend/ggml`
-- Lane C: excluded local subsystem lane for `x/mlxrunner/mlx` and `x/imagegen/...`
-- The current fast path is CPU first.
-- Unsupported configurations fall back to the dense KV path.
-- PolarQuant is deferred and not exposed as a public request-time selector in this phase.
+- `turboquant_qjl_v` is blocked in this checkout and is never silently enabled.
+- Hybrid/SWA architectures currently report surface-aware metadata and use conservative whole-model fallback when per-surface dispatch is unavailable.
+- Segmented `head_dim=576` support is experimental and opt-in only.
+- Experimental weight quantization remains scaffold-only metadata in this checkout.
+- `native_grouped_scaffold` and `native_backend` should not be assumed wire-compatible across distributed or RPC boundaries unless both ends match layout kind, layout version, and path semantics.
 
 ## TurboQuant And GGUF Quants
 
@@ -243,11 +275,14 @@ Use the benchmark tools in:
 - `scripts/benchmark_turboquant_plan5.ps1`
 - `scripts/benchmark_turboquant.ps1`
 - `cmd/bench`
+- `cmd/benchkv`
+- `cmd/benchppl`
 
 Recommended comparison set:
 
 - baseline: `f16`, `q8_0`, `q4_0`
 - TurboQuant: `tq35`, `tq25`
+- experimental: K-side QJL on/off, residual-tail `0` vs `128`
 
 Suggested metrics:
 
@@ -255,13 +290,9 @@ Suggested metrics:
 - total process memory
 - first-token latency
 - steady-state tokens/sec
-- mean absolute logit error vs dense reference
-- output drift summary
+- perplexity
+- sparse KLD vs baseline where available
+- NIAH retrieval pass/fail
+- corruption class / empty-output / truncation detection
 
-### Results Template
-
-| Mode | Weight Quant | KV Memory | Total Memory | TTFT | Tok/s | Logit Error | Path |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| f16 | Q4_K_M |  |  |  |  |  | dense-fallback |
-| tq35 | Q4_K_M |  |  |  |  |  | turboquant-cpu-fastpath |
-| tq25 | Q4_K_M |  |  |  |  |  | turboquant-cpu-fastpath |
+Token-match can still be useful as a secondary proxy, but it is not the primary acceptance criterion for this branch.

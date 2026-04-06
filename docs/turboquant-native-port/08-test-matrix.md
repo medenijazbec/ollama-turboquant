@@ -21,8 +21,11 @@ Implemented harness categories:
 
 - context scaling / fit ceiling
 - recall-under-distance
+- needle-in-a-haystack retrieval
 - corruption and prompt-file regression
 - asymmetric K/V verification
+- requested vs effective QJL reporting
+- residual-tail A/B rows on long-context profiles
 - Flash Attention gating reporting
 - staged RAM/VRAM telemetry with residency classification
 - Markdown, CSV, and JSONL outputs
@@ -32,9 +35,16 @@ Scaffold-only in this checkpoint:
 - multimodal / mmproj placement hooks
 - very large 397B sweeps unless explicitly requested
 
-Minimal A/B command:
+Minimal host-shell A/B command:
 
 ```bash
-docker compose -f docker-compose.ollama-bench.yml exec ollama-bench \
-  /scripts/run-ab-minimal-test-matrix.sh
+bash ./scripts/run-ab-minimal-test-matrix.sh
 ```
+
+Current matrix interpretation:
+
+- stable default lane: `tq35` / `tq25` with QJL off
+- experimental sweep: K-side QJL on/off
+- blocked lane: V-side QJL
+- long-context profiles automatically compare `residual_tail_tokens=0` and `128` unless explicitly overridden
+- segmented-head and surface-aware hybrid rows remain experimental and should not be summarized as stable wins
