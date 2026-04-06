@@ -708,12 +708,13 @@ func (b *Backend) TurboQuantSupport() ml.TurboQuantSupport {
 	}
 
 	return ml.TurboQuantSupport{
-		CPU:                    true,
-		KCPU:                   true,
-		ReferencePackedKCPU:    true,
-		BackendPackedKCPU:      false,
-		BackendPackedVCPU:      false,
-		RequiresFlashAttention: true,
+		CPU:                         true,
+		KCPU:                        true,
+		ReferencePackedKCPU:         true,
+		BackendPackedKCPU:           false,
+		BackendPackedVCPU:           false,
+		VReconstructionComputeDType: "fp32",
+		RequiresFlashAttention:      true,
 	}
 }
 

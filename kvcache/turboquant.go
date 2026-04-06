@@ -12,8 +12,10 @@ import (
 )
 
 type turboquantEntry struct {
-	key   payloadRow
-	value payloadRow
+	key      payloadRow
+	value    payloadRow
+	rawKey   []float32
+	rawValue []float32
 }
 
 type payloadRow struct {
@@ -33,6 +35,15 @@ type TurboQuantLayoutInfo struct {
 	OriginalHeadDim int
 	TailPad         int
 	BlockSize       int
+}
+
+type TurboQuantExperimentalConfig struct {
+	QJLKEnabled                 bool
+	QJLVEnabled                 bool
+	ResidualTailTokens          int
+	SegmentedHeadActive         bool
+	SegmentedHeadPlan           turboquant.SegmentedHeadDimPlan
+	VReconstructionComputeDType string
 }
 
 type TurboQuantBackendStatus struct {
@@ -62,6 +73,7 @@ type TurboQuantCache struct {
 	backendPackedKReady  bool
 	backendPackedVReady  bool
 	backendPackedBlocker string
+	experimental         TurboQuantExperimentalConfig
 }
 
 type layerShape struct {
@@ -102,6 +114,20 @@ func WrapWithTurboQuant(cache Cache, preset turboquant.Preset, requestedBackend 
 		return c
 	default:
 		return cache
+	}
+}
+
+func ConfigureTurboQuantExperimental(cache Cache, cfg TurboQuantExperimentalConfig) {
+	switch c := cache.(type) {
+	case *TurboQuantCache:
+		c.experimental = cfg
+		if c.experimental.VReconstructionComputeDType == "" {
+			c.experimental.VReconstructionComputeDType = "fp32"
+		}
+	case *WrapperCache:
+		for i := range c.caches {
+			ConfigureTurboQuantExperimental(c.caches[i], cfg)
+		}
 	}
 }
 
@@ -178,8 +204,10 @@ func (c *TurboQuantCache) Put(ctx ml.Context, key, value ml.Tensor) {
 		}
 
 		c.data[layer][loc] = turboquantEntry{
-			key:   keyBytes,
-			value: valueBytes,
+			key:      keyBytes,
+			value:    valueBytes,
+			rawKey:   append([]float32(nil), kFloats[i*keyStride:(i+1)*keyStride]...),
+			rawValue: append([]float32(nil), vFloats[i*valueStride:(i+1)*valueStride]...),
 		}
 	}
 }
@@ -218,13 +246,24 @@ func (c *TurboQuantCache) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor) 
 		}
 
 		dst := cell - first
-		decodedKey, err := decodePayloadRow(entry.key)
-		if err != nil {
-			panic(err)
-		}
-		decodedValue, err := decodePayloadRow(entry.value)
-		if err != nil {
-			panic(err)
+		useRawTail := c.experimental.ResidualTailTokens > 0 && cell >= maxInt(first, last-c.experimental.ResidualTailTokens+1)
+		var decodedKey []float32
+		var decodedValue []float32
+		var err error
+		if useRawTail && len(entry.rawKey) > 0 && len(entry.rawValue) > 0 {
+			// Implemented recent-token FP16 tail replay so the newest cache window can stay loss-sensitive without renaming the requested mode; idea source: @caiovicentino.
+			decodedKey = append([]float32(nil), entry.rawKey...)
+			decodedValue = append([]float32(nil), entry.rawValue...)
+		} else {
+			// @AmesianX: V IWHT / butterfly in FP16 can corrupt outputs; keep computation in FP32.
+			decodedKey, err = decodePayloadRow(entry.key)
+			if err != nil {
+				panic(err)
+			}
+			decodedValue, err = decodePayloadRow(entry.value)
+			if err != nil {
+				panic(err)
+			}
 		}
 
 		if len(decodedKey) != shape.keyDim*shape.numKVHeads {
@@ -250,6 +289,9 @@ func (c *TurboQuantCache) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor) 
 }
 
 func (c *TurboQuantCache) getFastPathTensors(ctx ml.Context, layerEntries []turboquantEntry, shape layerShape, first, last, cachedSize int) (ml.Tensor, ml.Tensor, bool) {
+	if c.experimental.ResidualTailTokens > 0 || c.experimental.SegmentedHeadActive {
+		return nil, nil, false
+	}
 	tqBackend, ok := c.meta.backend.(ml.TurboQuantBackend)
 	if !ok {
 		return nil, nil, false
@@ -356,6 +398,25 @@ func (c *TurboQuantCache) ensureLayerStorage(layer int) {
 }
 
 func (c *TurboQuantCache) encodeKeyVectorBytes(values []float32) (payloadRow, error) {
+	if c.experimental.SegmentedHeadActive {
+		encoded, err := turboquant.EncodeExperimentalSegmentedHeadVector(values, c.preset, c.experimental.SegmentedHeadPlan)
+		if err != nil {
+			return payloadRow{}, err
+		}
+		data, err := encoded.MarshalBinary()
+		if err != nil {
+			return payloadRow{}, err
+		}
+		row := payloadRow{
+			LayoutKind:    turboquant.NativeLayoutKindSegmented576,
+			LayoutVersion: encoded.Header.LayoutVersion,
+			Data:          data,
+			GroupCount:    len(encoded.Segments),
+			OriginalHead:  encoded.Header.OriginalHeadDim,
+		}
+		c.recordLayoutInfo(row, "native_grouped_scaffold")
+		return row, nil
+	}
 	if c.storageLayoutKind == turboquant.NativeLayoutKind128 {
 		encoded, err := turboquant.EncodeNativeGroupedVector(values, c.preset)
 		if err != nil {
@@ -377,7 +438,7 @@ func (c *TurboQuantCache) encodeKeyVectorBytes(values []float32) (payloadRow, er
 		return row, nil
 	}
 
-	encoded, err := turboquant.EncodeKeyVector(values, c.preset)
+	encoded, err := turboquant.EncodeKeyVectorWithOptions(values, c.preset, turboquant.EncodeOptions{EnableQJLK: c.experimental.QJLKEnabled})
 	if err != nil {
 		return payloadRow{}, err
 	}
@@ -395,6 +456,25 @@ func (c *TurboQuantCache) encodeKeyVectorBytes(values []float32) (payloadRow, er
 }
 
 func (c *TurboQuantCache) encodeValueVectorBytes(values []float32) (payloadRow, error) {
+	if c.experimental.SegmentedHeadActive {
+		encoded, err := turboquant.EncodeExperimentalSegmentedHeadVector(values, c.preset, c.experimental.SegmentedHeadPlan)
+		if err != nil {
+			return payloadRow{}, err
+		}
+		data, err := encoded.MarshalBinary()
+		if err != nil {
+			return payloadRow{}, err
+		}
+		row := payloadRow{
+			LayoutKind:    turboquant.NativeLayoutKindSegmented576,
+			LayoutVersion: encoded.Header.LayoutVersion,
+			Data:          data,
+			GroupCount:    len(encoded.Segments),
+			OriginalHead:  encoded.Header.OriginalHeadDim,
+		}
+		c.recordLayoutInfo(row, "native_grouped_scaffold")
+		return row, nil
+	}
 	if c.storageLayoutKind == turboquant.NativeLayoutKind128 {
 		encoded, err := turboquant.EncodeNativeGroupedVector(values, c.preset)
 		if err != nil {
@@ -416,7 +496,7 @@ func (c *TurboQuantCache) encodeValueVectorBytes(values []float32) (payloadRow, 
 		return row, nil
 	}
 
-	encoded, err := turboquant.EncodeValueVector(values, c.preset)
+	encoded, err := turboquant.EncodeValueVectorWithOptions(values, c.preset, turboquant.EncodeOptions{EnableQJLV: c.experimental.QJLVEnabled})
 	if err != nil {
 		return payloadRow{}, err
 	}
@@ -578,6 +658,12 @@ func decodePayloadRow(row payloadRow) ([]float32, error) {
 			return nil, err
 		}
 		return turboquant.DecodeNativeGroupedVector(encoded)
+	case turboquant.NativeLayoutKindSegmented576:
+		var encoded turboquant.NativeSegmentedHeadVector
+		if err := encoded.UnmarshalBinary(row.Data); err != nil {
+			return nil, err
+		}
+		return turboquant.DecodeExperimentalSegmentedHeadVector(encoded)
 	default:
 		return nil, fmt.Errorf("unsupported turboquant payload layout %q", row.LayoutKind)
 	}
@@ -593,7 +679,7 @@ func (c *TurboQuantCache) recordLayoutInfo(row payloadRow, pathKind string) {
 	c.layoutInfo.GroupCount = row.GroupCount
 	c.layoutInfo.OriginalHeadDim = row.OriginalHead
 	c.layoutInfo.TailPad = row.TailPad
-	if row.LayoutKind == turboquant.NativeLayoutKind128 {
+	if row.LayoutKind == turboquant.NativeLayoutKind128 || row.LayoutKind == turboquant.NativeLayoutKindSegmented576 {
 		c.layoutInfo.BlockSize = turboquant.NativeGroupSize
 		return
 	}
@@ -646,6 +732,13 @@ func (c *TurboQuantCache) maybeAttachBackendPackedHandle(backend ml.Backend) {
 	if c.backendPackedKOwned && !c.backendPackedVOwned {
 		c.backendPackedBlocker = "backend-native packed V ownership is still scaffolded"
 	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func permuteValueRows(values []float32, valueDim, numKVHeads, cachedSize int) []float32 {

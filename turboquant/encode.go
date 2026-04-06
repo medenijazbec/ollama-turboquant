@@ -14,16 +14,38 @@ type EncodedVector struct {
 	Blocks  []Block
 }
 
+type EncodeOptions struct {
+	EnableQJLK bool
+	EnableQJLV bool
+}
+
 func EncodeVector(values []float32, preset Preset) (EncodedVector, error) {
 	return encodeVector(values, preset, roleGeneric, objectiveMSE, preset.ValueBits)
 }
 
 func EncodeKeyVector(values []float32, preset Preset) (EncodedVector, error) {
-	return encodeVector(values, preset, roleKey, objectiveProduct, preset.KeyPrimaryBits)
+	return EncodeKeyVectorWithOptions(values, preset, EncodeOptions{})
 }
 
 func EncodeValueVector(values []float32, preset Preset) (EncodedVector, error) {
-	return encodeVector(values, preset, roleValue, objectiveMSE, preset.ValueBits)
+	return EncodeValueVectorWithOptions(values, preset, EncodeOptions{})
+}
+
+func EncodeKeyVectorWithOptions(values []float32, preset Preset, options EncodeOptions) (EncodedVector, error) {
+	objective := objectiveMSE
+	if options.EnableQJLK {
+		// @Arclabs001: WHT+QJL may help some K-side regimes, but not as a universal default.
+		objective = objectiveProduct
+	}
+	return encodeVector(values, preset, roleKey, objective, preset.KeyPrimaryBits)
+}
+
+func EncodeValueVectorWithOptions(values []float32, preset Preset, options EncodeOptions) (EncodedVector, error) {
+	objective := objectiveMSE
+	if options.EnableQJLV {
+		objective = objectiveProduct
+	}
+	return encodeVector(values, preset, roleValue, objective, preset.ValueBits)
 }
 
 func encodeVector(values []float32, preset Preset, role vectorRole, objective vectorObjective, bits int) (EncodedVector, error) {

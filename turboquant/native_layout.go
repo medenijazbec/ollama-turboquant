@@ -12,11 +12,13 @@ const (
 	// Implemented the native grouped payload header and validation path for 128-element storage groups; idea source: @TheTom.
 	// Implemented explicit block-size=128 grouped metadata in the native storage lane; idea source: @signalnine.
 	// Implemented the grouped storage shape to stay compatible with 4x32-oriented CUDA consumption later; idea source: @Madreag.
-	NativeGroupSize     = 128
-	NativeLayoutVersion = 1
-	NativeLayoutKind128 = "native_grouped_128"
-	ReferenceLayoutKind = "reference_full_vector"
-	nativeLayoutMagic   = "TQNG"
+	NativeGroupSize              = 128
+	NativeLayoutVersion          = 1
+	NativeLayoutKind128          = "native_grouped_128"
+	NativeLayoutKindSegmented576 = "native_segmented_576"
+	ReferenceLayoutKind          = "reference_full_vector"
+	nativeLayoutMagic            = "TQNG"
+	nativeSegmentedLayoutMagic   = "TQNS"
 )
 
 type SegmentedHeadDimPlan struct {
@@ -38,6 +40,19 @@ func ExperimentalSegmentedHeadDimPlan(headDim int) (SegmentedHeadDimPlan, bool) 
 	default:
 		return SegmentedHeadDimPlan{}, false
 	}
+}
+
+type NativeSegmentedHeadHeader struct {
+	LayoutVersion   int
+	LayoutKind      string
+	OriginalHeadDim int
+	SegmentCount    int
+}
+
+type NativeSegmentedHeadVector struct {
+	Header   NativeSegmentedHeadHeader
+	Segments []NativeGroupedVector
+	Preset   Preset
 }
 
 type NativeGroupedHeader struct {
@@ -274,6 +289,173 @@ func (v NativeGroupedVector) MarshalBinary() ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+func EncodeExperimentalSegmentedHeadVector(values []float32, preset Preset, plan SegmentedHeadDimPlan) (NativeSegmentedHeadVector, error) {
+	if !plan.Experimental {
+		return NativeSegmentedHeadVector{}, fmt.Errorf("segmented head plan for dim %d is not experimental-enabled", plan.HeadDim)
+	}
+	// @AmesianX: segmented 256+256+64 support for head_dim=576 should stay experimental until broadly validated.
+	if len(values) != plan.HeadDim {
+		return NativeSegmentedHeadVector{}, fmt.Errorf("segmented head dim mismatch: have %d want %d", len(values), plan.HeadDim)
+	}
+	segments := make([]NativeGroupedVector, 0, len(plan.Segments))
+	offset := 0
+	for _, size := range plan.Segments {
+		if size <= 0 || offset+size > len(values) {
+			return NativeSegmentedHeadVector{}, fmt.Errorf("invalid segmented head plan %+v", plan.Segments)
+		}
+		encoded, err := EncodeNativeGroupedVector(values[offset:offset+size], preset)
+		if err != nil {
+			return NativeSegmentedHeadVector{}, err
+		}
+		segments = append(segments, encoded)
+		offset += size
+	}
+	if offset != len(values) {
+		return NativeSegmentedHeadVector{}, fmt.Errorf("segmented head plan does not cover full dim %d", len(values))
+	}
+	return NativeSegmentedHeadVector{
+		Header: NativeSegmentedHeadHeader{
+			LayoutVersion:   NativeLayoutVersion,
+			LayoutKind:      NativeLayoutKindSegmented576,
+			OriginalHeadDim: plan.HeadDim,
+			SegmentCount:    len(plan.Segments),
+		},
+		Segments: segments,
+		Preset:   preset,
+	}, nil
+}
+
+func DecodeExperimentalSegmentedHeadVector(v NativeSegmentedHeadVector) ([]float32, error) {
+	if err := v.Validate(); err != nil {
+		return nil, err
+	}
+	decoded := make([]float32, 0, v.Header.OriginalHeadDim)
+	for _, segment := range v.Segments {
+		values, err := DecodeNativeGroupedVector(segment)
+		if err != nil {
+			return nil, err
+		}
+		decoded = append(decoded, values...)
+	}
+	if len(decoded) != v.Header.OriginalHeadDim {
+		return nil, fmt.Errorf("decoded segmented vector dim %d does not match header dim %d", len(decoded), v.Header.OriginalHeadDim)
+	}
+	return decoded, nil
+}
+
+func (v NativeSegmentedHeadVector) Validate() error {
+	if v.Header.LayoutVersion != NativeLayoutVersion {
+		return fmt.Errorf("unsupported segmented layout version %d", v.Header.LayoutVersion)
+	}
+	if v.Header.LayoutKind != NativeLayoutKindSegmented576 {
+		return fmt.Errorf("unsupported segmented layout kind %q", v.Header.LayoutKind)
+	}
+	if v.Header.OriginalHeadDim != 576 {
+		return fmt.Errorf("unsupported segmented head dim %d", v.Header.OriginalHeadDim)
+	}
+	if v.Header.SegmentCount != len(v.Segments) || v.Header.SegmentCount == 0 {
+		return fmt.Errorf("invalid segmented head segment count %d", v.Header.SegmentCount)
+	}
+	total := 0
+	for _, segment := range v.Segments {
+		if err := segment.Validate(); err != nil {
+			return err
+		}
+		total += segment.Header.OriginalHeadDim
+	}
+	if total != v.Header.OriginalHeadDim {
+		return fmt.Errorf("segmented head dim mismatch: segments=%d header=%d", total, v.Header.OriginalHeadDim)
+	}
+	return nil
+}
+
+func (v NativeSegmentedHeadVector) MarshalBinary() ([]byte, error) {
+	if err := v.Validate(); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	buf.WriteString(nativeSegmentedLayoutMagic)
+	for _, field := range []any{
+		uint8(v.Header.LayoutVersion),
+		uint8(v.Preset.ID),
+		uint32(v.Header.OriginalHeadDim),
+		uint32(v.Header.SegmentCount),
+	} {
+		if err := binary.Write(&buf, binary.LittleEndian, field); err != nil {
+			return nil, err
+		}
+	}
+	if err := writeString(&buf, v.Header.LayoutKind); err != nil {
+		return nil, err
+	}
+	for _, segment := range v.Segments {
+		payload, err := segment.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		if err := binary.Write(&buf, binary.LittleEndian, uint32(len(payload))); err != nil {
+			return nil, err
+		}
+		buf.Write(payload)
+	}
+	return buf.Bytes(), nil
+}
+
+func (v *NativeSegmentedHeadVector) UnmarshalBinary(data []byte) error {
+	r := bytes.NewReader(data)
+	magic := make([]byte, len(nativeSegmentedLayoutMagic))
+	if _, err := io.ReadFull(r, magic); err != nil {
+		return err
+	}
+	if string(magic) != nativeSegmentedLayoutMagic {
+		return fmt.Errorf("unexpected segmented layout magic %q", string(magic))
+	}
+	var version uint8
+	var presetID uint8
+	var originalHeadDim uint32
+	var segmentCount uint32
+	for _, field := range []any{&version, &presetID, &originalHeadDim, &segmentCount} {
+		if err := binary.Read(r, binary.LittleEndian, field); err != nil {
+			return err
+		}
+	}
+	layoutKind, err := readString(r)
+	if err != nil {
+		return err
+	}
+	preset, err := PresetByID(presetID)
+	if err != nil {
+		return err
+	}
+	segments := make([]NativeGroupedVector, 0, int(segmentCount))
+	for i := 0; i < int(segmentCount); i++ {
+		var payloadLen uint32
+		if err := binary.Read(r, binary.LittleEndian, &payloadLen); err != nil {
+			return err
+		}
+		payload := make([]byte, payloadLen)
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return err
+		}
+		var segment NativeGroupedVector
+		if err := segment.UnmarshalBinary(payload); err != nil {
+			return err
+		}
+		segments = append(segments, segment)
+	}
+	*v = NativeSegmentedHeadVector{
+		Header: NativeSegmentedHeadHeader{
+			LayoutVersion:   int(version),
+			LayoutKind:      layoutKind,
+			OriginalHeadDim: int(originalHeadDim),
+			SegmentCount:    int(segmentCount),
+		},
+		Segments: segments,
+		Preset:   preset,
+	}
+	return v.Validate()
 }
 
 func (v *NativeGroupedVector) UnmarshalBinary(data []byte) error {

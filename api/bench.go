@@ -3,21 +3,24 @@ package api
 import "context"
 
 type BenchScoreRequest struct {
-	Model     string         `json:"model"`
-	Prompt    string         `json:"prompt"`
-	Target    string         `json:"target"`
-	Options   map[string]any `json:"options,omitempty"`
-	KeepAlive *Duration      `json:"keep_alive,omitempty"`
+	Model                string         `json:"model"`
+	Prompt               string         `json:"prompt"`
+	Target               string         `json:"target"`
+	Options              map[string]any `json:"options,omitempty"`
+	KeepAlive            *Duration      `json:"keep_alive,omitempty"`
+	IncludeTokenLogprobs bool           `json:"include_token_logprobs,omitempty"`
+	TopLogprobs          int            `json:"top_logprobs,omitempty"`
 }
 
 type BenchScoreResponse struct {
-	Model                 string  `json:"model"`
-	Prompt                string  `json:"prompt,omitempty"`
-	Target                string  `json:"target"`
-	Observed              string  `json:"observed,omitempty"`
-	TokenCount            int     `json:"token_count"`
-	NegativeLogLikelihood float64 `json:"negative_log_likelihood"`
-	Perplexity            float64 `json:"perplexity"`
+	Model                 string    `json:"model"`
+	Prompt                string    `json:"prompt,omitempty"`
+	Target                string    `json:"target"`
+	Observed              string    `json:"observed,omitempty"`
+	TokenCount            int       `json:"token_count"`
+	NegativeLogLikelihood float64   `json:"negative_log_likelihood"`
+	Perplexity            float64   `json:"perplexity"`
+	PerTokenLogprobs      []Logprob `json:"per_token_logprobs,omitempty"`
 
 	Metrics
 }

@@ -81,17 +81,31 @@ func TestEncodeKeyAndValueUseDifferentObjectives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if keyEncoded.Blocks[0].Objective != uint8(objectiveProduct) {
-		t.Fatalf("key objective = %d, want %d", keyEncoded.Blocks[0].Objective, objectiveProduct)
+	if keyEncoded.Blocks[0].Objective != uint8(objectiveMSE) {
+		t.Fatalf("key objective = %d, want %d", keyEncoded.Blocks[0].Objective, objectiveMSE)
 	}
 	if valueEncoded.Blocks[0].Objective != uint8(objectiveMSE) {
 		t.Fatalf("value objective = %d, want %d", valueEncoded.Blocks[0].Objective, objectiveMSE)
 	}
-	if keyEncoded.Blocks[0].QJLRows == 0 {
-		t.Fatal("expected product-mode key rows to carry a residual sketch")
+	if keyEncoded.Blocks[0].QJLRows != 0 {
+		t.Fatal("expected stable default key rows to omit a residual sketch")
 	}
 	if valueEncoded.Blocks[0].QJLRows != 0 {
-		t.Fatal("expected MSE value rows to omit a residual sketch")
+		t.Fatal("expected stable default value rows to omit a residual sketch")
+	}
+}
+
+func TestEncodeKeyVectorExperimentalQJL(t *testing.T) {
+	values := pseudoRandomVector(32, 0x79)
+	keyEncoded, err := EncodeKeyVectorWithOptions(values, PresetTQ35, EncodeOptions{EnableQJLK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyEncoded.Blocks[0].Objective != uint8(objectiveProduct) {
+		t.Fatalf("key objective = %d, want %d", keyEncoded.Blocks[0].Objective, objectiveProduct)
+	}
+	if keyEncoded.Blocks[0].QJLRows == 0 {
+		t.Fatal("expected experimental K-side QJL rows to carry a residual sketch")
 	}
 }
 

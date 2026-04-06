@@ -225,6 +225,50 @@ func TestDetectTurboQuantModelSupportRejectsNonAlignedHeadDim(t *testing.T) {
 	}
 }
 
+func TestDetectTurboQuantModelSupportMarksSegmented576Experimental(t *testing.T) {
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), &runnerTestBackend{
+		config: stubConfig{arch: "llama", u32: map[string]uint32{"attention.key_length": 576}},
+	})
+
+	got := detectTurboQuantModelSupport(model)
+	if got.SupportTier != turboQuantSupportExperimental {
+		t.Fatalf("SupportTier = %q, want experimental", got.SupportTier)
+	}
+	if !got.SegmentedHeadExperimental {
+		t.Fatal("expected segmented head experimental support")
+	}
+	if len(got.SegmentedHeadPlan) != 3 || got.SegmentedHeadPlan[0] != 256 || got.SegmentedHeadPlan[1] != 256 || got.SegmentedHeadPlan[2] != 64 {
+		t.Fatalf("unexpected segmented plan: %+v", got.SegmentedHeadPlan)
+	}
+	if got.NativeTurboQuantAllowed {
+		t.Fatal("expected native rollout disabled until explicit segmented opt-in")
+	}
+}
+
+func TestDetectTurboQuantModelSupportMarksMixedSlidingWindowSurfaceAware(t *testing.T) {
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), &runnerTestBackend{
+		config: stubConfig{
+			arch: "gemma3",
+			u32:  map[string]uint32{"attention.key_length": 128},
+			i32s: map[string][]int32{"attention.sliding_window": {0, 4096, 0, 4096}},
+		},
+	})
+
+	got := detectTurboQuantModelSupport(model)
+	if got.AttentionSurfacePolicy != "surface-aware" {
+		t.Fatalf("AttentionSurfacePolicy = %q, want surface-aware", got.AttentionSurfacePolicy)
+	}
+	if !got.SWABypassRecommended {
+		t.Fatal("expected SWA bypass recommendation")
+	}
+	if !got.QJLKAllowed {
+		t.Fatal("expected K-side QJL to remain allowlisted for validated families")
+	}
+	if got.QJLVAllowed {
+		t.Fatal("expected V-side QJL to remain disabled by default")
+	}
+}
+
 func TestDetectTurboQuantModelSupportMarksHybridWrapperPaths(t *testing.T) {
 	model := newRunnerTestModel(
 		kvcache.NewWrapperCache(kvcache.NewEncoderCache(), kvcache.NewCausalCache(nil)),

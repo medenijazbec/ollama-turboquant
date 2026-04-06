@@ -7,6 +7,7 @@ import (
 	"iter"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -715,10 +716,15 @@ func TestShiftCacheSlot(t *testing.T) {
 }
 
 type runnerTestBackend struct {
-	supportsTurboQuantFastPath bool
-	supportsTurboQuantCUDA     bool
-	requiresFlashAttention     bool
-	config                     fs.Config
+	supportsTurboQuantFastPath  bool
+	supportsTurboQuantCUDA      bool
+	backendPackedKCPU           bool
+	backendPackedKCUDA          bool
+	backendPackedVCPU           bool
+	backendPackedVCUDA          bool
+	requiresFlashAttention      bool
+	vReconstructionComputeDType string
+	config                      fs.Config
 }
 
 func (b *runnerTestBackend) Close() {}
@@ -760,11 +766,16 @@ func (b *runnerTestBackend) CacheConfig() ml.CacheConfig {
 
 func (b *runnerTestBackend) TurboQuantSupport() ml.TurboQuantSupport {
 	return ml.TurboQuantSupport{
-		CPU:                    b.supportsTurboQuantFastPath,
-		CUDA:                   b.supportsTurboQuantCUDA,
-		ReferencePackedKCPU:    b.supportsTurboQuantFastPath,
-		ReferencePackedKCUDA:   b.supportsTurboQuantCUDA,
-		RequiresFlashAttention: b.requiresFlashAttention,
+		CPU:                         b.supportsTurboQuantFastPath,
+		CUDA:                        b.supportsTurboQuantCUDA,
+		ReferencePackedKCPU:         b.supportsTurboQuantFastPath,
+		ReferencePackedKCUDA:        b.supportsTurboQuantCUDA,
+		BackendPackedKCPU:           b.backendPackedKCPU,
+		BackendPackedKCUDA:          b.backendPackedKCUDA,
+		BackendPackedVCPU:           b.backendPackedVCPU,
+		BackendPackedVCUDA:          b.backendPackedVCUDA,
+		VReconstructionComputeDType: b.vReconstructionComputeDType,
+		RequiresFlashAttention:      b.requiresFlashAttention,
 	}
 }
 
@@ -816,7 +827,7 @@ func TestNewInputCacheWrapsTurboQuantCausalCaches(t *testing.T) {
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,7 +847,7 @@ func TestNewInputCachePreservesWrapperNonCausalCaches(t *testing.T) {
 		backend,
 	)
 
-	inputCache, err := NewInputCache(model, "tq25", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq25", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,7 +869,7 @@ func TestNewInputCacheLeavesNonTurboQuantModesUnwrapped(t *testing.T) {
 	backend := &runnerTestBackend{}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "q4_0", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "q4_0", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -875,7 +886,7 @@ func TestNewInputCacheFallsBackToDenseWhenTurboQuantFastPathUnsupported(t *testi
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: false}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -905,7 +916,7 @@ func TestNewInputCacheTracksExplicitCUDARequestWithoutCUDAFastPath(t *testing.T)
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: true}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", "", "cuda", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "cuda", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -926,7 +937,7 @@ func TestNewInputCacheFallsBackToKOnlyWhenVTurboRequiresFlashAttention(t *testin
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: true, requiresFlashAttention: true}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -956,7 +967,7 @@ func TestNewInputCacheKeepsVTurboWhenFlashAttentionIsEnabled(t *testing.T) {
 	backend := &runnerTestBackend{supportsTurboQuantFastPath: true, requiresFlashAttention: true}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionEnabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionEnabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -988,7 +999,7 @@ func TestNewInputCacheExposesSupportMatrixFields(t *testing.T) {
 	}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1020,7 +1031,7 @@ func TestNewInputCacheMarksHybridSupportAsNonNative(t *testing.T) {
 		backend,
 	)
 
-	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1054,7 +1065,7 @@ func TestNewInputCacheExposesPresetMetadata(t *testing.T) {
 	}
 	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
 
-	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionEnabled, 16, 1, 1, false)
+	inputCache, err := NewInputCache(model, "", "tq35", "tq35", "", ml.FlashAttentionEnabled, 16, 1, 1, false, turboQuantExperimentalSettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1068,5 +1079,116 @@ func TestNewInputCacheExposesPresetMetadata(t *testing.T) {
 	}
 	if info.PresetWarning != "" {
 		t.Fatalf("unexpected preset warning: %+v", info)
+	}
+}
+
+func TestResolveTurboQuantFallbackRejectsBackendPackedVWithoutFP32(t *testing.T) {
+	support := ml.TurboQuantSupport{
+		BackendPackedVCPU:           true,
+		VReconstructionComputeDType: "fp16",
+	}
+
+	effectiveK, effectiveV, resolvedK, resolvedV, reason, fallbackApplied, kOnlyFallback, vTurboSupported, _ := resolveTurboQuantFallback(
+		support,
+		"",
+		true,
+		"tq35",
+		"tq35",
+		"reference_wrapper",
+		"backend_packed",
+	)
+
+	if effectiveK != "tq35" || effectiveV != "f16" {
+		t.Fatalf("unexpected effective split: k=%q v=%q", effectiveK, effectiveV)
+	}
+	if resolvedK != "tq35" || resolvedV != "f16" {
+		t.Fatalf("unexpected resolved split: k=%q v=%q", resolvedK, resolvedV)
+	}
+	if !fallbackApplied || !kOnlyFallback {
+		t.Fatalf("expected explicit K-only fallback, got fallback=%t kOnly=%t", fallbackApplied, kOnlyFallback)
+	}
+	if vTurboSupported {
+		t.Fatalf("expected V turbo to be rejected when backend reconstruction is not fp32")
+	}
+	if reason == "" {
+		t.Fatal("expected fallback reason")
+	}
+}
+
+func TestNewInputCacheReportsSurfaceAwareWholeModelFallback(t *testing.T) {
+	backend := &runnerTestBackend{
+		supportsTurboQuantFastPath: true,
+		config: stubConfig{
+			arch: "gemma3",
+			u32:  map[string]uint32{"attention.key_length": 128},
+			i32s: map[string][]int32{"attention.sliding_window": {0, 4096, 0, 4096}},
+		},
+	}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{
+		SurfacePolicy: "surface-aware",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := inputCache.RuntimeInfo()
+	if info.AttentionSurfacePolicyRequested != "surface-aware" {
+		t.Fatalf("AttentionSurfacePolicyRequested = %q, want surface-aware", info.AttentionSurfacePolicyRequested)
+	}
+	if info.AttentionSurfacePolicyEffective != "uniform" {
+		t.Fatalf("AttentionSurfacePolicyEffective = %q, want uniform", info.AttentionSurfacePolicyEffective)
+	}
+	if !info.AttentionSurfaceOverrideApplied {
+		t.Fatalf("expected whole-model fallback override, got %+v", info)
+	}
+	if info.AttentionSurfaceBehavior != "global=f16,swa=f16,dispatch=whole-model-fallback" {
+		t.Fatalf("unexpected surface behavior: %q", info.AttentionSurfaceBehavior)
+	}
+	if info.AttentionSurfaceClasses != "global,swa" {
+		t.Fatalf("unexpected surface classes: %q", info.AttentionSurfaceClasses)
+	}
+	if info.EffectiveK != "f16" || info.EffectiveV != "f16" {
+		t.Fatalf("unexpected effective cache split after surface fallback: %+v", info)
+	}
+}
+
+func TestNewInputCacheBlocksVSideQJLAndMarksWeightQuantScaffold(t *testing.T) {
+	backend := &runnerTestBackend{
+		supportsTurboQuantFastPath: true,
+		config: stubConfig{
+			arch: "llama",
+			u32:  map[string]uint32{"attention.key_length": 128},
+		},
+	}
+	model := newRunnerTestModel(kvcache.NewCausalCache(nil), backend)
+
+	inputCache, err := NewInputCache(model, "tq35", "", "", "", ml.FlashAttentionDisabled, 16, 1, 1, false, turboQuantExperimentalSettings{
+		QJLKEnabled:                    true,
+		QJLVEnabled:                    true,
+		ExperimentalWeightQuantization: "attention_only",
+		ExperimentalWeightQuantPolicy:  "attention_only_safe",
+		ExperimentalWeightQuantSource:  "f16",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := inputCache.RuntimeInfo()
+	if !info.QJLKRequested || !info.QJLKEnabled {
+		t.Fatalf("expected K-side QJL request to remain effective, got %+v", info)
+	}
+	if !info.QJLVRequested || info.QJLVEnabled {
+		t.Fatalf("expected V-side QJL to be blocked, got %+v", info)
+	}
+	if !info.FallbackApplied || !strings.Contains(info.FallbackReason, "V-side QJL is experimental-disabled") {
+		t.Fatalf("expected explicit V-side QJL fallback reason, got %+v", info)
+	}
+	if info.ExperimentalWeightQuantization != "attention_only" || info.ExperimentalWeightQuantPolicy != "attention_only_safe" || info.ExperimentalWeightQuantSource != "f16" {
+		t.Fatalf("unexpected weight-quant scaffold metadata: %+v", info)
+	}
+	if info.ExperimentalWeightQuantActive {
+		t.Fatalf("weight-quant scaffold should not be active, got %+v", info)
 	}
 }

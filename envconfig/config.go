@@ -226,6 +226,22 @@ var (
 	KvCacheBackend = String("OLLAMA_KV_CACHE_BACKEND")
 	// TurboQuantPreset selects rollout guidance for warnings and recommendation metadata.
 	TurboQuantPreset = String("OLLAMA_TURBOQUANT_PRESET")
+	// TurboQuantQJLK enables experimental K-side QJL in the TurboQuant lane.
+	TurboQuantQJLK = BoolWithDefault("OLLAMA_TURBOQUANT_QJL_K")
+	// TurboQuantQJLV enables experimental V-side QJL in the TurboQuant lane.
+	TurboQuantQJLV = BoolWithDefault("OLLAMA_TURBOQUANT_QJL_V")
+	// TurboQuantResidualTailTokens keeps the most recent N tokens in the residual FP16 tail path.
+	TurboQuantResidualTailTokens = Uint("OLLAMA_TURBOQUANT_RESIDUAL_TAIL_TOKENS", 0)
+	// TurboQuantAllowSegmentedHeads enables experimental segmented head-dim handling.
+	TurboQuantAllowSegmentedHeads = Bool("OLLAMA_TURBOQUANT_ALLOW_SEGMENTED_HEADS")
+	// TurboQuantSurfacePolicy selects uniform vs surface-aware TurboQuant policy.
+	TurboQuantSurfacePolicy = String("OLLAMA_TURBOQUANT_SURFACE_POLICY")
+	// ExperimentalWeightQuantization selects an experimental weight quant lane.
+	ExperimentalWeightQuantization = String("OLLAMA_EXPERIMENTAL_WEIGHT_QUANTIZATION")
+	// ExperimentalWeightQuantPolicy selects a mixed attention-only experimental weight policy.
+	ExperimentalWeightQuantPolicy = String("OLLAMA_EXPERIMENTAL_WEIGHT_QUANT_POLICY")
+	// ExperimentalWeightQuantSource chooses the source-of-truth dtype for experimental weight quantization.
+	ExperimentalWeightQuantSource = String("OLLAMA_EXPERIMENTAL_WEIGHT_QUANT_SOURCE")
 	// NoHistory disables readline history.
 	NoHistory = Bool("OLLAMA_NOHISTORY")
 	// NoPrune disables pruning of model blobs on startup.
@@ -312,33 +328,41 @@ type EnvVar struct {
 
 func AsMap() map[string]EnvVar {
 	ret := map[string]EnvVar{
-		"OLLAMA_DEBUG":              {"OLLAMA_DEBUG", LogLevel(), "Show additional debug information (e.g. OLLAMA_DEBUG=1)"},
-		"OLLAMA_DEBUG_LOG_REQUESTS": {"OLLAMA_DEBUG_LOG_REQUESTS", DebugLogRequests(), "Log inference request bodies and replay curl commands to a temp directory"},
-		"OLLAMA_FLASH_ATTENTION":    {"OLLAMA_FLASH_ATTENTION", FlashAttention(false), "Enabled flash attention"},
-		"OLLAMA_KV_CACHE_TYPE":      {"OLLAMA_KV_CACHE_TYPE", KvCacheType(), "Quantization type for the K/V cache: f16, q8_0, q4_0, tq25, tq35 (aliases: tq3, tq4; default: f16)"},
-		"OLLAMA_KV_CACHE_TYPE_K":    {"OLLAMA_KV_CACHE_TYPE_K", KvCacheTypeK(), "K-side KV cache override: f16, q8_0, q4_0, tq25, tq35"},
-		"OLLAMA_KV_CACHE_TYPE_V":    {"OLLAMA_KV_CACHE_TYPE_V", KvCacheTypeV(), "V-side KV cache override: f16, q8_0, q4_0, tq25, tq35"},
-		"OLLAMA_KV_CACHE_BACKEND":   {"OLLAMA_KV_CACHE_BACKEND", KvCacheBackend(), "Optional KV cache backend request: cuda"},
-		"OLLAMA_TURBOQUANT_PRESET":  {"OLLAMA_TURBOQUANT_PRESET", TurboQuantPreset(), "TurboQuant rollout guidance preset: safe, conservative, experimental"},
-		"OLLAMA_GPU_OVERHEAD":       {"OLLAMA_GPU_OVERHEAD", GpuOverhead(), "Reserve a portion of VRAM per GPU (bytes)"},
-		"OLLAMA_HOST":               {"OLLAMA_HOST", Host(), "IP Address for the ollama server (default 127.0.0.1:11434)"},
-		"OLLAMA_KEEP_ALIVE":         {"OLLAMA_KEEP_ALIVE", KeepAlive(), "The duration that models stay loaded in memory (default \"5m\")"},
-		"OLLAMA_LLM_LIBRARY":        {"OLLAMA_LLM_LIBRARY", LLMLibrary(), "Set LLM library to bypass autodetection"},
-		"OLLAMA_LOAD_TIMEOUT":       {"OLLAMA_LOAD_TIMEOUT", LoadTimeout(), "How long to allow model loads to stall before giving up (default \"5m\")"},
-		"OLLAMA_MAX_LOADED_MODELS":  {"OLLAMA_MAX_LOADED_MODELS", MaxRunners(), "Maximum number of loaded models per GPU"},
-		"OLLAMA_MAX_QUEUE":          {"OLLAMA_MAX_QUEUE", MaxQueue(), "Maximum number of queued requests"},
-		"OLLAMA_MODELS":             {"OLLAMA_MODELS", Models(), "The path to the models directory"},
-		"OLLAMA_NO_CLOUD":           {"OLLAMA_NO_CLOUD", NoCloud(), "Disable Ollama cloud features (remote inference and web search)"},
-		"OLLAMA_NOHISTORY":          {"OLLAMA_NOHISTORY", NoHistory(), "Do not preserve readline history"},
-		"OLLAMA_NOPRUNE":            {"OLLAMA_NOPRUNE", NoPrune(), "Do not prune model blobs on startup"},
-		"OLLAMA_NUM_PARALLEL":       {"OLLAMA_NUM_PARALLEL", NumParallel(), "Maximum number of parallel requests"},
-		"OLLAMA_ORIGINS":            {"OLLAMA_ORIGINS", AllowedOrigins(), "A comma separated list of allowed origins"},
-		"OLLAMA_SCHED_SPREAD":       {"OLLAMA_SCHED_SPREAD", SchedSpread(), "Always schedule model across all GPUs"},
-		"OLLAMA_MULTIUSER_CACHE":    {"OLLAMA_MULTIUSER_CACHE", MultiUserCache(), "Optimize prompt caching for multi-user scenarios"},
-		"OLLAMA_CONTEXT_LENGTH":     {"OLLAMA_CONTEXT_LENGTH", ContextLength(), "Context length to use unless otherwise specified (default: 4k/32k/256k based on VRAM)"},
-		"OLLAMA_EDITOR":             {"OLLAMA_EDITOR", Editor(), "Path to editor for interactive prompt editing (Ctrl+G)"},
-		"OLLAMA_NEW_ENGINE":         {"OLLAMA_NEW_ENGINE", NewEngine(), "Enable the new Ollama engine"},
-		"OLLAMA_REMOTES":            {"OLLAMA_REMOTES", Remotes(), "Allowed hosts for remote models (default \"ollama.com\")"},
+		"OLLAMA_DEBUG":                            {"OLLAMA_DEBUG", LogLevel(), "Show additional debug information (e.g. OLLAMA_DEBUG=1)"},
+		"OLLAMA_DEBUG_LOG_REQUESTS":               {"OLLAMA_DEBUG_LOG_REQUESTS", DebugLogRequests(), "Log inference request bodies and replay curl commands to a temp directory"},
+		"OLLAMA_FLASH_ATTENTION":                  {"OLLAMA_FLASH_ATTENTION", FlashAttention(false), "Enabled flash attention"},
+		"OLLAMA_KV_CACHE_TYPE":                    {"OLLAMA_KV_CACHE_TYPE", KvCacheType(), "Quantization type for the K/V cache: f16, q8_0, q4_0, tq25, tq35 (aliases: tq3, tq4; default: f16)"},
+		"OLLAMA_KV_CACHE_TYPE_K":                  {"OLLAMA_KV_CACHE_TYPE_K", KvCacheTypeK(), "K-side KV cache override: f16, q8_0, q4_0, tq25, tq35"},
+		"OLLAMA_KV_CACHE_TYPE_V":                  {"OLLAMA_KV_CACHE_TYPE_V", KvCacheTypeV(), "V-side KV cache override: f16, q8_0, q4_0, tq25, tq35"},
+		"OLLAMA_KV_CACHE_BACKEND":                 {"OLLAMA_KV_CACHE_BACKEND", KvCacheBackend(), "Optional KV cache backend request: cuda"},
+		"OLLAMA_TURBOQUANT_PRESET":                {"OLLAMA_TURBOQUANT_PRESET", TurboQuantPreset(), "TurboQuant rollout guidance preset: safe, conservative, experimental"},
+		"OLLAMA_TURBOQUANT_QJL_K":                 {"OLLAMA_TURBOQUANT_QJL_K", TurboQuantQJLK(false), "Enable experimental K-side QJL for TurboQuant (default false)"},
+		"OLLAMA_TURBOQUANT_QJL_V":                 {"OLLAMA_TURBOQUANT_QJL_V", TurboQuantQJLV(false), "Enable experimental V-side QJL for TurboQuant (default false; not recommended)"},
+		"OLLAMA_TURBOQUANT_RESIDUAL_TAIL_TOKENS":  {"OLLAMA_TURBOQUANT_RESIDUAL_TAIL_TOKENS", TurboQuantResidualTailTokens(), "Keep the newest N tokens in an experimental FP16 residual tail buffer"},
+		"OLLAMA_TURBOQUANT_ALLOW_SEGMENTED_HEADS": {"OLLAMA_TURBOQUANT_ALLOW_SEGMENTED_HEADS", TurboQuantAllowSegmentedHeads(), "Enable experimental segmented head-dim TurboQuant handling (e.g. 576=256+256+64)"},
+		"OLLAMA_TURBOQUANT_SURFACE_POLICY":        {"OLLAMA_TURBOQUANT_SURFACE_POLICY", TurboQuantSurfacePolicy(), "TurboQuant surface policy: auto, uniform, surface-aware"},
+		"OLLAMA_EXPERIMENTAL_WEIGHT_QUANTIZATION": {"OLLAMA_EXPERIMENTAL_WEIGHT_QUANTIZATION", ExperimentalWeightQuantization(), "Experimental weight quantization lane: off or attention_only"},
+		"OLLAMA_EXPERIMENTAL_WEIGHT_QUANT_POLICY": {"OLLAMA_EXPERIMENTAL_WEIGHT_QUANT_POLICY", ExperimentalWeightQuantPolicy(), "Experimental weight quant policy: attention_only_safe"},
+		"OLLAMA_EXPERIMENTAL_WEIGHT_QUANT_SOURCE": {"OLLAMA_EXPERIMENTAL_WEIGHT_QUANT_SOURCE", ExperimentalWeightQuantSource(), "Experimental weight quant source-of-truth dtype: f16 or bf16"},
+		"OLLAMA_GPU_OVERHEAD":                     {"OLLAMA_GPU_OVERHEAD", GpuOverhead(), "Reserve a portion of VRAM per GPU (bytes)"},
+		"OLLAMA_HOST":                             {"OLLAMA_HOST", Host(), "IP Address for the ollama server (default 127.0.0.1:11434)"},
+		"OLLAMA_KEEP_ALIVE":                       {"OLLAMA_KEEP_ALIVE", KeepAlive(), "The duration that models stay loaded in memory (default \"5m\")"},
+		"OLLAMA_LLM_LIBRARY":                      {"OLLAMA_LLM_LIBRARY", LLMLibrary(), "Set LLM library to bypass autodetection"},
+		"OLLAMA_LOAD_TIMEOUT":                     {"OLLAMA_LOAD_TIMEOUT", LoadTimeout(), "How long to allow model loads to stall before giving up (default \"5m\")"},
+		"OLLAMA_MAX_LOADED_MODELS":                {"OLLAMA_MAX_LOADED_MODELS", MaxRunners(), "Maximum number of loaded models per GPU"},
+		"OLLAMA_MAX_QUEUE":                        {"OLLAMA_MAX_QUEUE", MaxQueue(), "Maximum number of queued requests"},
+		"OLLAMA_MODELS":                           {"OLLAMA_MODELS", Models(), "The path to the models directory"},
+		"OLLAMA_NO_CLOUD":                         {"OLLAMA_NO_CLOUD", NoCloud(), "Disable Ollama cloud features (remote inference and web search)"},
+		"OLLAMA_NOHISTORY":                        {"OLLAMA_NOHISTORY", NoHistory(), "Do not preserve readline history"},
+		"OLLAMA_NOPRUNE":                          {"OLLAMA_NOPRUNE", NoPrune(), "Do not prune model blobs on startup"},
+		"OLLAMA_NUM_PARALLEL":                     {"OLLAMA_NUM_PARALLEL", NumParallel(), "Maximum number of parallel requests"},
+		"OLLAMA_ORIGINS":                          {"OLLAMA_ORIGINS", AllowedOrigins(), "A comma separated list of allowed origins"},
+		"OLLAMA_SCHED_SPREAD":                     {"OLLAMA_SCHED_SPREAD", SchedSpread(), "Always schedule model across all GPUs"},
+		"OLLAMA_MULTIUSER_CACHE":                  {"OLLAMA_MULTIUSER_CACHE", MultiUserCache(), "Optimize prompt caching for multi-user scenarios"},
+		"OLLAMA_CONTEXT_LENGTH":                   {"OLLAMA_CONTEXT_LENGTH", ContextLength(), "Context length to use unless otherwise specified (default: 4k/32k/256k based on VRAM)"},
+		"OLLAMA_EDITOR":                           {"OLLAMA_EDITOR", Editor(), "Path to editor for interactive prompt editing (Ctrl+G)"},
+		"OLLAMA_NEW_ENGINE":                       {"OLLAMA_NEW_ENGINE", NewEngine(), "Enable the new Ollama engine"},
+		"OLLAMA_REMOTES":                          {"OLLAMA_REMOTES", Remotes(), "Allowed hosts for remote models (default \"ollama.com\")"},
 
 		// Informational
 		"HTTP_PROXY":  {"HTTP_PROXY", String("HTTP_PROXY")(), "HTTP proxy"},

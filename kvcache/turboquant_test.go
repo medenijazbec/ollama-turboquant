@@ -158,8 +158,8 @@ func TestTurboQuantCacheStoresPaperFormatRows(t *testing.T) {
 			if keyBlock.RegularBits != uint8(preset.KeyPrimaryBits) {
 				t.Fatalf("key bits = %d, want %d", keyBlock.RegularBits, preset.KeyPrimaryBits)
 			}
-			if keyBlock.QJLRows == 0 {
-				t.Fatal("expected product-mode key block to include QJL rows")
+			if keyBlock.QJLRows != 0 {
+				t.Fatal("expected stable default key block to omit QJL rows")
 			}
 
 			valueVector, err := turboquant.UnmarshalEncodedVector(entry.value.Data)
@@ -183,6 +183,75 @@ func TestTurboQuantCacheStoresPaperFormatRows(t *testing.T) {
 				t.Fatalf("value QJL rows = %d, want 0", valueBlock.QJLRows)
 			}
 		})
+	}
+}
+
+func TestTurboQuantCacheStoresExperimentalQJLWhenEnabled(t *testing.T) {
+	cache := NewTurboQuantCache(NewCausalCache(nil), turboquant.PresetTQ35, "")
+	defer cache.Close()
+	ConfigureTurboQuantExperimental(cache, TurboQuantExperimentalConfig{QJLKEnabled: true})
+
+	backend := &testBackend{}
+	cache.Init(backend, ml.DTypeTQ35, 1, 16, 16)
+
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	mustStartForward(t, cache, ctx, []int32{0}, []int{0})
+	cache.SetLayer(0)
+	cache.Put(
+		ctx,
+		ctx.FromFloats([]float32{1, 2}, 1, 1, 2),
+		ctx.FromFloats([]float32{11, 12}, 1, 1, 2),
+	)
+
+	entry := cache.data[0][0]
+	keyVector, err := turboquant.UnmarshalEncodedVector(entry.key.Data)
+	if err != nil {
+		t.Fatalf("unmarshal key vector: %v", err)
+	}
+	if len(keyVector.Blocks) != 1 {
+		t.Fatalf("key vector block count = %d, want 1", len(keyVector.Blocks))
+	}
+	if keyVector.Blocks[0].QJLRows == 0 {
+		t.Fatal("expected experimental K-side QJL rows to be present")
+	}
+}
+
+func TestConfigureTurboQuantExperimentalDefaultsVReconstructionComputeDType(t *testing.T) {
+	cache := NewTurboQuantCache(NewCausalCache(nil), turboquant.PresetTQ35, "")
+	defer cache.Close()
+
+	ConfigureTurboQuantExperimental(cache, TurboQuantExperimentalConfig{})
+	if cache.experimental.VReconstructionComputeDType != "fp32" {
+		t.Fatalf("VReconstructionComputeDType = %q, want fp32", cache.experimental.VReconstructionComputeDType)
+	}
+}
+
+func TestTurboQuantCacheResidualTailReturnsExactRecentToken(t *testing.T) {
+	cache := NewTurboQuantCache(NewCausalCache(nil), turboquant.PresetTQ35, "")
+	defer cache.Close()
+	ConfigureTurboQuantExperimental(cache, TurboQuantExperimentalConfig{ResidualTailTokens: 1})
+
+	backend := &testBackend{}
+	cache.Init(backend, ml.DTypeTQ35, 1, 16, 16)
+
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	mustStartForward(t, cache, ctx, []int32{0, 1}, []int{0, 0})
+	cache.SetLayer(0)
+	keyValues := []float32{1.5, 2.5}
+	valueValues := []float32{10.25, 99.75}
+	cache.Put(ctx, ctx.FromFloats(keyValues, 1, 1, 2), ctx.FromFloats(valueValues, 1, 1, 2))
+
+	_, value, _ := cache.Get(ctx)
+	got := value.Floats()
+	if len(got) != len(valueValues) {
+		t.Fatalf("value len = %d, want %d", len(got), len(valueValues))
+	}
+	if got[len(got)-1] != valueValues[len(valueValues)-1] {
+		t.Fatalf("latest value token = %v, want exact %v", got[len(got)-1], valueValues[len(valueValues)-1])
 	}
 }
 

@@ -171,6 +171,36 @@ func TestExperimentalSegmentedHeadDimPlan(t *testing.T) {
 	}
 }
 
+func TestExperimentalSegmentedHeadVectorRoundTrip(t *testing.T) {
+	plan, ok := ExperimentalSegmentedHeadDimPlan(576)
+	if !ok {
+		t.Fatal("expected segmented plan for head_dim=576")
+	}
+	in := makeRamp(576)
+	encoded, err := EncodeExperimentalSegmentedHeadVector(in, PresetTQ35, plan)
+	if err != nil {
+		t.Fatalf("EncodeExperimentalSegmentedHeadVector: %v", err)
+	}
+	data, err := encoded.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary: %v", err)
+	}
+	var decodedPayload NativeSegmentedHeadVector
+	if err := decodedPayload.UnmarshalBinary(data); err != nil {
+		t.Fatalf("UnmarshalBinary: %v", err)
+	}
+	out, err := DecodeExperimentalSegmentedHeadVector(decodedPayload)
+	if err != nil {
+		t.Fatalf("DecodeExperimentalSegmentedHeadVector: %v", err)
+	}
+	if len(out) != len(in) {
+		t.Fatalf("decoded len = %d, want %d", len(out), len(in))
+	}
+	if mse(in, out) > 5000 {
+		t.Fatalf("segmented round-trip mse = %v, want <= 5000", mse(in, out))
+	}
+}
+
 func makeRamp(n int) []float32 {
 	out := make([]float32, n)
 	for i := range out {

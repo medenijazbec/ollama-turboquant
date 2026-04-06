@@ -3,6 +3,7 @@ package ollamarunner
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/ollama/ollama/fs"
@@ -32,14 +33,22 @@ const (
 )
 
 type turboQuantModelSupport struct {
-	DetectedHeadDim         int
-	HeadDimSource           turboQuantHeadDimSource
-	ArchitectureClass       string
-	SupportTier             turboQuantSupportTier
-	SupportReason           string
-	UnsupportedReason       string
-	HybridKVArchitecture    bool
-	NativeTurboQuantAllowed bool
+	DetectedHeadDim                int
+	HeadDimSource                  turboQuantHeadDimSource
+	ArchitectureClass              string
+	SupportTier                    turboQuantSupportTier
+	SupportReason                  string
+	UnsupportedReason              string
+	HybridKVArchitecture           bool
+	NativeTurboQuantAllowed        bool
+	SegmentedHeadExperimental      bool
+	SegmentedHeadPlan              []int
+	AttentionSurfacePolicy         string
+	AttentionSurfaceClasses        []string
+	SWABypassRecommended           bool
+	QJLKAllowed                    bool
+	QJLVAllowed                    bool
+	ExperimentalWeightQuantAllowed bool
 }
 
 func detectTurboQuantModelSupport(m model.Model) turboQuantModelSupport {
@@ -56,6 +65,12 @@ func detectTurboQuantModelSupport(m model.Model) turboQuantModelSupport {
 		HybridKVArchitecture:    hybrid,
 		SupportTier:             turboQuantSupportUnsupported,
 		NativeTurboQuantAllowed: false,
+		AttentionSurfacePolicy:  "uniform",
+	}
+	support.AttentionSurfaceClasses = detectAttentionSurfaceClasses(cfg, hybrid)
+	if len(support.AttentionSurfaceClasses) > 1 || slices.Contains(support.AttentionSurfaceClasses, "hybrid_unknown") {
+		support.AttentionSurfacePolicy = "surface-aware"
+		support.SWABypassRecommended = slices.Contains(support.AttentionSurfaceClasses, "swa") || slices.Contains(support.AttentionSurfaceClasses, "hybrid_unknown")
 	}
 
 	if headDim <= 0 {
@@ -79,6 +94,12 @@ func detectTurboQuantModelSupport(m model.Model) turboQuantModelSupport {
 			support.SupportTier = turboQuantSupportExperimental
 			support.SupportReason = "head_dim=256 is experimental and requires explicit rollout controls"
 			support.NativeTurboQuantAllowed = !hybrid
+		case headDim == 576:
+			support.SupportTier = turboQuantSupportExperimental
+			support.SupportReason = "head_dim=576 is experimental_segmented and requires explicit rollout controls"
+			support.SegmentedHeadExperimental = true
+			support.SegmentedHeadPlan = []int{256, 256, 64}
+			support.NativeTurboQuantAllowed = false
 		case headDim%32 != 0:
 			support.UnsupportedReason = fmt.Sprintf("unsupported head_dim=%d for native TurboQuant rollout", headDim)
 		default:
@@ -113,7 +134,21 @@ func detectTurboQuantModelSupport(m model.Model) turboQuantModelSupport {
 		}
 	}
 
+	support.QJLKAllowed = !hybrid && (support.SupportTier == turboQuantSupportSafe || support.SupportTier == turboQuantSupportConservative || support.SupportTier == turboQuantSupportExperimental) && architectureClass != "deepseek-mla" && architectureClass != "glm-mla"
+	support.QJLVAllowed = false
+	support.ExperimentalWeightQuantAllowed = !hybrid && (architectureClass == "llama-family" || architectureClass == "qwen-family" || architectureClass == "mistral-family" || architectureClass == "gemma-family")
+
 	return support
+}
+
+func detectAttentionSurfaceClasses(cfg fs.Config, hybrid bool) []string {
+	if hasMixedSlidingWindow(cfg) {
+		return []string{"global", "swa"}
+	}
+	if hybrid {
+		return []string{"hybrid_unknown"}
+	}
+	return []string{"global"}
 }
 
 func detectHeadDim(cfg fs.Config) (int, turboQuantHeadDimSource) {

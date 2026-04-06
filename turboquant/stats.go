@@ -1,10 +1,10 @@
 package turboquant
 
 type Stats struct {
-	MSE         float32
-	RMSE        float32
-	MeanAbsErr  float32
-	MaxAbsErr   float32
+	MSE        float32
+	RMSE       float32
+	MeanAbsErr float32
+	MaxAbsErr  float32
 }
 
 func Compare(reference, approx []float32) Stats {

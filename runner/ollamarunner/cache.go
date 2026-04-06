@@ -33,60 +33,89 @@ type InputCache struct {
 
 	cache kvcache.Cache
 
-	kvCacheRequested          string
-	kvCacheEffective          string
-	kvCacheRequestedK         string
-	kvCacheRequestedV         string
-	kvCacheEffectiveK         string
-	kvCacheEffectiveV         string
-	kvAlgoResolved            string
-	kvAlgoResolvedK           string
-	kvAlgoResolvedV           string
-	kvCacheBackend            string
-	kvCachePath               string
-	kvCachePathK              string
-	kvCachePathV              string
-	kvSymmetric               bool
-	kvAsymmetric              bool
-	requestedMode             string
-	effectiveMode             string
-	fallbackReason            string
-	fallbackApplied           bool
-	kOnlyFallback             bool
-	turboQuantPathKind        string
-	nativeTurboQuantActive    bool
-	referenceTurboQuantActive bool
-	backendPackedKOwned       bool
-	backendPackedVOwned       bool
-	backendPackedKAvailable   bool
-	backendPackedVAvailable   bool
-	nativeBackendReady        bool
-	nativeBackendBlocker      string
-	faEnabled                 bool
-	faRequiredForVTurbo       bool
-	vTurboSupported           bool
-	detectedHeadDim           int
-	headDimSource             string
-	architectureClass         string
-	supportTier               string
-	supportReason             string
-	unsupportedReason         string
-	hybridKVArchitecture      bool
-	nativeTurboQuantAllowed   bool
-	presetRequested           string
-	presetResolved            string
-	presetWarning             string
-	pairingValidated          bool
-	experimentalLane          bool
-	tqBlockSize               int
-	tqLayoutKind              string
-	tqLayoutVersion           int
-	tqGroupCount              int
-	tqOriginalHeadDim         int
-	tqTailPad                 int
+	kvCacheRequested                string
+	kvCacheEffective                string
+	kvCacheRequestedK               string
+	kvCacheRequestedV               string
+	kvCacheEffectiveK               string
+	kvCacheEffectiveV               string
+	kvAlgoResolved                  string
+	kvAlgoResolvedK                 string
+	kvAlgoResolvedV                 string
+	kvCacheBackend                  string
+	kvCachePath                     string
+	kvCachePathK                    string
+	kvCachePathV                    string
+	kvSymmetric                     bool
+	kvAsymmetric                    bool
+	requestedMode                   string
+	effectiveMode                   string
+	fallbackReason                  string
+	fallbackApplied                 bool
+	kOnlyFallback                   bool
+	turboQuantPathKind              string
+	nativeTurboQuantActive          bool
+	referenceTurboQuantActive       bool
+	backendPackedKOwned             bool
+	backendPackedVOwned             bool
+	backendPackedKAvailable         bool
+	backendPackedVAvailable         bool
+	nativeBackendReady              bool
+	nativeBackendBlocker            string
+	faEnabled                       bool
+	faRequiredForVTurbo             bool
+	vTurboSupported                 bool
+	detectedHeadDim                 int
+	headDimSource                   string
+	architectureClass               string
+	supportTier                     string
+	supportReason                   string
+	unsupportedReason               string
+	hybridKVArchitecture            bool
+	nativeTurboQuantAllowed         bool
+	presetRequested                 string
+	presetResolved                  string
+	presetWarning                   string
+	pairingValidated                bool
+	experimentalLane                bool
+	tqBlockSize                     int
+	tqLayoutKind                    string
+	tqLayoutVersion                 int
+	tqGroupCount                    int
+	tqOriginalHeadDim               int
+	tqTailPad                       int
+	vReconstructionComputeDType     string
+	segmentedHeadActive             bool
+	segmentedHeadPlan               string
+	attentionSurfacePolicyRequested string
+	attentionSurfacePolicyEffective string
+	attentionSurfaceBehavior        string
+	attentionSurfaceOverrideApplied bool
+	attentionSurfaceOverrideReason  string
+	attentionSurfaceClasses         string
+	qjlKRequested                   bool
+	qjlVRequested                   bool
+	qjlKEnabled                     bool
+	qjlVEnabled                     bool
+	residualTailTokens              int
+	experimentalWeightQuantization  string
+	experimentalWeightQuantPolicy   string
+	experimentalWeightQuantSource   string
+	experimentalWeightQuantActive   bool
 }
 
-func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend string, flashAttention ml.FlashAttentionType, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
+type turboQuantExperimentalSettings struct {
+	QJLKEnabled                    bool
+	QJLVEnabled                    bool
+	ResidualTailTokens             int
+	AllowSegmentedHeads            bool
+	SurfacePolicy                  string
+	ExperimentalWeightQuantization string
+	ExperimentalWeightQuantPolicy  string
+	ExperimentalWeightQuantSource  string
+}
+
+func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, kvCacheBackend string, flashAttention ml.FlashAttentionType, kvSize int32, numSlots int, batchSize int, multiUserCache bool, experimental turboQuantExperimentalSettings) (*InputCache, error) {
 	numCtx := kvSize / int32(numSlots)
 
 	if int(numCtx) < batchSize {
@@ -149,6 +178,67 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	tqGroupCount := 0
 	tqOriginalHeadDim := 0
 	tqTailPad := 0
+	vReconstructionComputeDType := ""
+	segmentedHeadActive := false
+	segmentedHeadPlan := ""
+	attentionSurfacePolicyRequested := normalizeAttentionSurfacePolicy(experimental.SurfacePolicy)
+	attentionSurfacePolicyEffective := attentionSurfacePolicyRequested
+	if attentionSurfacePolicyEffective == "auto" {
+		attentionSurfacePolicyEffective = support.AttentionSurfacePolicy
+		if attentionSurfacePolicyEffective == "" {
+			attentionSurfacePolicyEffective = "uniform"
+		}
+	}
+	attentionSurfaceBehavior := "global=f16"
+	attentionSurfaceOverrideApplied := false
+	attentionSurfaceOverrideReason := ""
+	attentionSurfaceClasses := strings.Join(support.AttentionSurfaceClasses, ",")
+	qjlKRequested := experimental.QJLKEnabled
+	qjlVRequested := experimental.QJLVEnabled
+	qjlKEnabled := experimental.QJLKEnabled
+	qjlVEnabled := experimental.QJLVEnabled
+	residualTailTokens := max(0, experimental.ResidualTailTokens)
+	experimentalWeightQuantization := normalizeExperimentalWeightQuantization(experimental.ExperimentalWeightQuantization)
+	experimentalWeightQuantPolicy := normalizeExperimentalWeightQuantPolicy(experimental.ExperimentalWeightQuantPolicy)
+	experimentalWeightQuantSource := normalizeExperimentalWeightQuantSource(experimental.ExperimentalWeightQuantSource)
+	experimentalWeightQuantActive := false
+
+	if qjlVEnabled {
+		qjlVEnabled = false
+		fallbackApplied = true
+		fallbackReason = appendFallbackReason(fallbackReason, "V-side QJL is experimental-disabled")
+	}
+	if qjlKEnabled && !support.QJLKAllowed {
+		qjlKEnabled = false
+		fallbackApplied = true
+		fallbackReason = appendFallbackReason(fallbackReason, "K-side QJL is not allowlisted for this model family/support tier")
+	}
+	if experimentalWeightQuantization != "off" {
+		if !support.ExperimentalWeightQuantAllowed {
+			fallbackApplied = true
+			fallbackReason = appendFallbackReason(fallbackReason, "experimental weight quantization is not allowlisted for this model family/support tier")
+		} else {
+			// Implemented scaffold-only weight quant lane metadata so KV and weight compression stay separate; idea source: @animehacker.
+			experimentalLane = true
+			fallbackReason = appendFallbackReason(fallbackReason, "experimental weight quantization is scaffold-only; no active model-weight compression applied")
+		}
+	}
+	if attentionSurfacePolicyEffective == "surface-aware" && support.SWABypassRecommended && (isTurboQuantKVType(requestedKVCacheTypeK) || isTurboQuantKVType(requestedKVCacheTypeV)) {
+		// Implemented surface-aware whole-model fallback when per-surface dispatch is unavailable, so SWA-heavy models are not silently quantized uniformly; idea source: @AmesianX.
+		attentionSurfaceOverrideApplied = true
+		attentionSurfaceOverrideReason = "surface-aware policy requested but per-surface dispatch is unavailable; falling back to f16 for fragile attention surfaces"
+		attentionSurfacePolicyEffective = "uniform"
+		attentionSurfaceBehavior = "global=f16,swa=f16,dispatch=whole-model-fallback"
+		fallbackApplied = true
+		fallbackReason = appendFallbackReason(fallbackReason, attentionSurfaceOverrideReason)
+		normalizedKVCacheTypeK = "f16"
+		normalizedKVCacheTypeV = "f16"
+	}
+	if experimental.AllowSegmentedHeads && support.SegmentedHeadExperimental {
+		segmentedHeadActive = true
+		segmentedHeadPlan = joinIntSlice(support.SegmentedHeadPlan, "+")
+		experimentalLane = true
+	}
 	if cache != nil {
 		backendSupport := backendTurboQuantSupport(model.Backend())
 		dtype := kvCacheTypeFromStr(normalizedKVCacheType)
@@ -178,6 +268,14 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		}
 		if preset, ok := kvcachePreset(dtype); ok {
 			cache = kvcache.WrapWithTurboQuant(cache, preset, normalizedKVCacheBackend)
+			kvcache.ConfigureTurboQuantExperimental(cache, kvcache.TurboQuantExperimentalConfig{
+				QJLKEnabled:                 qjlKEnabled,
+				QJLVEnabled:                 qjlVEnabled,
+				ResidualTailTokens:          residualTailTokens,
+				SegmentedHeadActive:         segmentedHeadActive,
+				SegmentedHeadPlan:           turboquant.SegmentedHeadDimPlan{HeadDim: support.DetectedHeadDim, Segments: append([]int(nil), support.SegmentedHeadPlan...), Experimental: support.SegmentedHeadExperimental},
+				VReconstructionComputeDType: "fp32",
+			})
 			kvCachePath = resolveKVCachePath(model.Backend(), dtype, normalizedKVCacheBackend)
 			kvAlgoResolved = turboquant.AlgorithmPaper
 			turboQuantPathKind = "reference_wrapper"
@@ -300,6 +398,30 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 		}
 	}
 
+	if isTurboQuantKVType(kvCacheEffectiveV) {
+		vReconstructionComputeDType = effectiveVReconstructionComputeDType(turboQuantPathKind, backendPackedVOwned, backendSupportFor(model.Backend()), referenceTurboQuantActive)
+		if vReconstructionComputeDType != "fp32" {
+			fallbackApplied = true
+			if isTurboQuantKVType(kvCacheEffectiveV) {
+				kvCacheEffectiveV = "f16"
+				kvCachePathV = "dense-fallback"
+				kvAlgoResolvedV = ""
+				kOnlyFallback = isTurboQuantKVType(kvCacheEffectiveK)
+				fallbackReason = appendFallbackReason(fallbackReason, "supported V reconstruction path did not guarantee fp32 compute")
+			}
+			if kvCacheEffectiveK == kvCacheEffectiveV {
+				kvCacheEffective = kvCacheEffectiveK
+			} else {
+				kvCacheEffective = "mixed"
+			}
+		}
+	} else if isTurboQuantKVType(kvCacheEffectiveK) {
+		vReconstructionComputeDType = "fp32"
+	}
+	if attentionSurfaceBehavior == "global=f16" {
+		attentionSurfaceBehavior = deriveAttentionSurfaceBehavior(attentionSurfaceClasses, attentionSurfaceOverrideApplied, kvCacheEffectiveK, kvCacheEffectiveV)
+	}
+
 	if kvCacheEffectiveK == "" {
 		kvCacheEffectiveK = "f16"
 	}
@@ -348,62 +470,80 @@ func NewInputCache(model model.Model, kvCacheType, kvCacheTypeK, kvCacheTypeV, k
 	}
 
 	return &InputCache{
-		numCtx:                    numCtx,
-		enabled:                   cache != nil,
-		slots:                     slots,
-		multiUserCache:            multiUserCache,
-		cache:                     cache,
-		kvCacheRequested:          normalizedKVCacheType,
-		kvCacheEffective:          kvCacheEffective,
-		kvCacheRequestedK:         requestedKVCacheTypeK,
-		kvCacheRequestedV:         requestedKVCacheTypeV,
-		kvCacheEffectiveK:         kvCacheEffectiveK,
-		kvCacheEffectiveV:         kvCacheEffectiveV,
-		kvAlgoResolved:            kvAlgoResolved,
-		kvAlgoResolvedK:           kvAlgoResolvedK,
-		kvAlgoResolvedV:           kvAlgoResolvedV,
-		kvCacheBackend:            normalizedKVCacheBackend,
-		kvCachePath:               kvCachePath,
-		kvCachePathK:              kvCachePathK,
-		kvCachePathV:              kvCachePathV,
-		kvSymmetric:               kvCacheEffectiveK == kvCacheEffectiveV,
-		kvAsymmetric:              kvCacheEffectiveK != kvCacheEffectiveV,
-		requestedMode:             requestedMode,
-		effectiveMode:             effectiveMode,
-		fallbackReason:            fallbackReason,
-		fallbackApplied:           fallbackApplied || requestedMode != effectiveMode,
-		kOnlyFallback:             kOnlyFallback,
-		turboQuantPathKind:        turboQuantPathKind,
-		nativeTurboQuantActive:    nativeTurboQuantActive,
-		referenceTurboQuantActive: referenceTurboQuantActive,
-		backendPackedKOwned:       backendPackedKOwned,
-		backendPackedVOwned:       backendPackedVOwned,
-		backendPackedKAvailable:   backendPackedKAvailable,
-		backendPackedVAvailable:   backendPackedVAvailable,
-		nativeBackendReady:        nativeBackendReady,
-		nativeBackendBlocker:      nativeBackendBlocker,
-		faEnabled:                 faEnabled,
-		faRequiredForVTurbo:       faRequiredForVTurbo,
-		vTurboSupported:           vTurboSupported,
-		detectedHeadDim:           detectedHeadDim,
-		headDimSource:             headDimSource,
-		architectureClass:         architectureClass,
-		supportTier:               supportTier,
-		supportReason:             supportReason,
-		unsupportedReason:         unsupportedReason,
-		hybridKVArchitecture:      hybridKVArchitecture,
-		nativeTurboQuantAllowed:   nativeTurboQuantAllowed,
-		presetRequested:           presetRequested,
-		presetResolved:            presetResolved,
-		presetWarning:             presetWarning,
-		pairingValidated:          pairingValidated,
-		experimentalLane:          experimentalLane,
-		tqBlockSize:               tqBlockSize,
-		tqLayoutKind:              tqLayoutKind,
-		tqLayoutVersion:           tqLayoutVersion,
-		tqGroupCount:              tqGroupCount,
-		tqOriginalHeadDim:         tqOriginalHeadDim,
-		tqTailPad:                 tqTailPad,
+		numCtx:                          numCtx,
+		enabled:                         cache != nil,
+		slots:                           slots,
+		multiUserCache:                  multiUserCache,
+		cache:                           cache,
+		kvCacheRequested:                normalizedKVCacheType,
+		kvCacheEffective:                kvCacheEffective,
+		kvCacheRequestedK:               requestedKVCacheTypeK,
+		kvCacheRequestedV:               requestedKVCacheTypeV,
+		kvCacheEffectiveK:               kvCacheEffectiveK,
+		kvCacheEffectiveV:               kvCacheEffectiveV,
+		kvAlgoResolved:                  kvAlgoResolved,
+		kvAlgoResolvedK:                 kvAlgoResolvedK,
+		kvAlgoResolvedV:                 kvAlgoResolvedV,
+		kvCacheBackend:                  normalizedKVCacheBackend,
+		kvCachePath:                     kvCachePath,
+		kvCachePathK:                    kvCachePathK,
+		kvCachePathV:                    kvCachePathV,
+		kvSymmetric:                     kvCacheEffectiveK == kvCacheEffectiveV,
+		kvAsymmetric:                    kvCacheEffectiveK != kvCacheEffectiveV,
+		requestedMode:                   requestedMode,
+		effectiveMode:                   effectiveMode,
+		fallbackReason:                  fallbackReason,
+		fallbackApplied:                 fallbackApplied || requestedMode != effectiveMode,
+		kOnlyFallback:                   kOnlyFallback,
+		turboQuantPathKind:              turboQuantPathKind,
+		nativeTurboQuantActive:          nativeTurboQuantActive,
+		referenceTurboQuantActive:       referenceTurboQuantActive,
+		backendPackedKOwned:             backendPackedKOwned,
+		backendPackedVOwned:             backendPackedVOwned,
+		backendPackedKAvailable:         backendPackedKAvailable,
+		backendPackedVAvailable:         backendPackedVAvailable,
+		nativeBackendReady:              nativeBackendReady,
+		nativeBackendBlocker:            nativeBackendBlocker,
+		faEnabled:                       faEnabled,
+		faRequiredForVTurbo:             faRequiredForVTurbo,
+		vTurboSupported:                 vTurboSupported,
+		detectedHeadDim:                 detectedHeadDim,
+		headDimSource:                   headDimSource,
+		architectureClass:               architectureClass,
+		supportTier:                     supportTier,
+		supportReason:                   supportReason,
+		unsupportedReason:               unsupportedReason,
+		hybridKVArchitecture:            hybridKVArchitecture,
+		nativeTurboQuantAllowed:         nativeTurboQuantAllowed,
+		presetRequested:                 presetRequested,
+		presetResolved:                  presetResolved,
+		presetWarning:                   presetWarning,
+		pairingValidated:                pairingValidated,
+		experimentalLane:                experimentalLane,
+		tqBlockSize:                     tqBlockSize,
+		tqLayoutKind:                    tqLayoutKind,
+		tqLayoutVersion:                 tqLayoutVersion,
+		tqGroupCount:                    tqGroupCount,
+		tqOriginalHeadDim:               tqOriginalHeadDim,
+		tqTailPad:                       tqTailPad,
+		vReconstructionComputeDType:     vReconstructionComputeDType,
+		segmentedHeadActive:             segmentedHeadActive,
+		segmentedHeadPlan:               segmentedHeadPlan,
+		attentionSurfacePolicyRequested: attentionSurfacePolicyRequested,
+		attentionSurfacePolicyEffective: attentionSurfacePolicyEffective,
+		attentionSurfaceBehavior:        attentionSurfaceBehavior,
+		attentionSurfaceOverrideApplied: attentionSurfaceOverrideApplied,
+		attentionSurfaceOverrideReason:  attentionSurfaceOverrideReason,
+		attentionSurfaceClasses:         attentionSurfaceClasses,
+		qjlKRequested:                   qjlKRequested,
+		qjlVRequested:                   qjlVRequested,
+		qjlKEnabled:                     qjlKEnabled,
+		qjlVEnabled:                     qjlVEnabled,
+		residualTailTokens:              residualTailTokens,
+		experimentalWeightQuantization:  experimentalWeightQuantization,
+		experimentalWeightQuantPolicy:   experimentalWeightQuantPolicy,
+		experimentalWeightQuantSource:   experimentalWeightQuantSource,
+		experimentalWeightQuantActive:   experimentalWeightQuantActive,
 	}, nil
 }
 
@@ -505,6 +645,15 @@ func requiresFlashAttentionForVTurbo(support ml.TurboQuantSupport, requestedV ml
 	return support.RequiresFlashAttention
 }
 
+func backendPackedVSupportedForBackend(support ml.TurboQuantSupport, requestedBackend string) bool {
+	switch strings.ToLower(strings.TrimSpace(requestedBackend)) {
+	case "cuda":
+		return support.BackendPackedVCUDA
+	default:
+		return support.BackendPackedVCPU
+	}
+}
+
 func resolveTurboQuantFallback(support ml.TurboQuantSupport, requestedBackend string, faEnabled bool, requestedKType, requestedVType, pathK, pathV string) (effectiveKType, effectiveVType, resolvedKType, resolvedVType string, fallbackReason string, fallbackApplied bool, kOnlyFallback bool, vTurboSupported bool, faRequiredForVTurbo bool) {
 	effectiveKType = requestedKType
 	effectiveVType = requestedVType
@@ -540,6 +689,21 @@ func resolveTurboQuantFallback(support ml.TurboQuantSupport, requestedBackend st
 	if !vPathSupported {
 		fallbackApplied = true
 		fallbackReason = fmt.Sprintf("requested V turboquant path is not supported on backend=%s path=%s; falling back to f16 on V", firstNonEmpty(requestedBackend, "cpu"), pathV)
+		effectiveVType = "f16"
+		resolvedVType = "f16"
+		vTurboSupported = false
+		if kSupported && isTurboQuantKVType(requestedKType) {
+			kOnlyFallback = true
+			return
+		}
+		effectiveKType = "f16"
+		resolvedKType = "f16"
+		return
+	}
+
+	if backendPackedVSupportedForBackend(support, requestedBackend) && strings.ToLower(strings.TrimSpace(support.VReconstructionComputeDType)) != "fp32" {
+		fallbackApplied = true
+		fallbackReason = "requested V turboquant backend path does not guarantee fp32 reconstruction; falling back to f16 on V"
 		effectiveVType = "f16"
 		resolvedVType = "f16"
 		vTurboSupported = false
@@ -598,57 +762,75 @@ func formatNativeSupportFallbackReason(support turboQuantModelSupport, reference
 }
 
 type KVCacheRuntimeInfo struct {
-	Requested                 string
-	Effective                 string
-	RequestedK                string
-	RequestedV                string
-	EffectiveK                string
-	EffectiveV                string
-	RequestedMode             string
-	EffectiveMode             string
-	Algorithm                 string
-	AlgorithmK                string
-	AlgorithmV                string
-	Backend                   string
-	Path                      string
-	PathK                     string
-	PathV                     string
-	Symmetric                 bool
-	Asymmetric                bool
-	FallbackReason            string
-	FallbackApplied           bool
-	KOnlyFallback             bool
-	TurboQuantPathKind        string
-	NativeTurboQuantActive    bool
-	ReferenceTurboQuantActive bool
-	BackendPackedKOwned       bool
-	BackendPackedVOwned       bool
-	BackendPackedKAvailable   bool
-	BackendPackedVAvailable   bool
-	NativeBackendReady        bool
-	NativeBackendBlocker      string
-	FAEnabled                 bool
-	FARequiredForVTurbo       bool
-	VTurboSupported           bool
-	DetectedHeadDim           int
-	HeadDimSource             string
-	ArchitectureClass         string
-	SupportTier               string
-	SupportReason             string
-	UnsupportedReason         string
-	HybridKVArchitecture      bool
-	NativeTurboQuantAllowed   bool
-	PresetRequested           string
-	PresetResolved            string
-	PresetWarning             string
-	PairingValidated          bool
-	ExperimentalLane          bool
-	TQBlockSize               int
-	TQLayoutKind              string
-	TQLayoutVersion           int
-	TQGroupCount              int
-	TQOriginalHeadDim         int
-	TQTailPad                 int
+	Requested                       string
+	Effective                       string
+	RequestedK                      string
+	RequestedV                      string
+	EffectiveK                      string
+	EffectiveV                      string
+	RequestedMode                   string
+	EffectiveMode                   string
+	Algorithm                       string
+	AlgorithmK                      string
+	AlgorithmV                      string
+	Backend                         string
+	Path                            string
+	PathK                           string
+	PathV                           string
+	Symmetric                       bool
+	Asymmetric                      bool
+	FallbackReason                  string
+	FallbackApplied                 bool
+	KOnlyFallback                   bool
+	TurboQuantPathKind              string
+	NativeTurboQuantActive          bool
+	ReferenceTurboQuantActive       bool
+	BackendPackedKOwned             bool
+	BackendPackedVOwned             bool
+	BackendPackedKAvailable         bool
+	BackendPackedVAvailable         bool
+	NativeBackendReady              bool
+	NativeBackendBlocker            string
+	FAEnabled                       bool
+	FARequiredForVTurbo             bool
+	VTurboSupported                 bool
+	DetectedHeadDim                 int
+	HeadDimSource                   string
+	ArchitectureClass               string
+	SupportTier                     string
+	SupportReason                   string
+	UnsupportedReason               string
+	HybridKVArchitecture            bool
+	NativeTurboQuantAllowed         bool
+	PresetRequested                 string
+	PresetResolved                  string
+	PresetWarning                   string
+	PairingValidated                bool
+	ExperimentalLane                bool
+	TQBlockSize                     int
+	TQLayoutKind                    string
+	TQLayoutVersion                 int
+	TQGroupCount                    int
+	TQOriginalHeadDim               int
+	TQTailPad                       int
+	VReconstructionComputeDType     string
+	SegmentedHeadActive             bool
+	SegmentedHeadPlan               string
+	AttentionSurfacePolicyRequested string
+	AttentionSurfacePolicyEffective string
+	AttentionSurfaceBehavior        string
+	AttentionSurfaceOverrideApplied bool
+	AttentionSurfaceOverrideReason  string
+	AttentionSurfaceClasses         string
+	QJLKRequested                   bool
+	QJLVRequested                   bool
+	QJLKEnabled                     bool
+	QJLVEnabled                     bool
+	ResidualTailTokens              int
+	ExperimentalWeightQuantization  string
+	ExperimentalWeightQuantPolicy   string
+	ExperimentalWeightQuantSource   string
+	ExperimentalWeightQuantActive   bool
 }
 
 func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
@@ -656,58 +838,173 @@ func (c *InputCache) RuntimeInfo() KVCacheRuntimeInfo {
 		return KVCacheRuntimeInfo{}
 	}
 	return KVCacheRuntimeInfo{
-		Requested:                 c.kvCacheRequested,
-		Effective:                 c.kvCacheEffective,
-		RequestedK:                c.kvCacheRequestedK,
-		RequestedV:                c.kvCacheRequestedV,
-		EffectiveK:                c.kvCacheEffectiveK,
-		EffectiveV:                c.kvCacheEffectiveV,
-		RequestedMode:             c.requestedMode,
-		EffectiveMode:             c.effectiveMode,
-		Algorithm:                 c.kvAlgoResolved,
-		AlgorithmK:                c.kvAlgoResolvedK,
-		AlgorithmV:                c.kvAlgoResolvedV,
-		Backend:                   c.kvCacheBackend,
-		Path:                      c.kvCachePath,
-		PathK:                     c.kvCachePathK,
-		PathV:                     c.kvCachePathV,
-		Symmetric:                 c.kvSymmetric,
-		Asymmetric:                c.kvAsymmetric,
-		FallbackReason:            c.fallbackReason,
-		FallbackApplied:           c.fallbackApplied,
-		KOnlyFallback:             c.kOnlyFallback,
-		TurboQuantPathKind:        c.turboQuantPathKind,
-		NativeTurboQuantActive:    c.nativeTurboQuantActive,
-		ReferenceTurboQuantActive: c.referenceTurboQuantActive,
-		BackendPackedKOwned:       c.backendPackedKOwned,
-		BackendPackedVOwned:       c.backendPackedVOwned,
-		BackendPackedKAvailable:   c.backendPackedKAvailable,
-		BackendPackedVAvailable:   c.backendPackedVAvailable,
-		NativeBackendReady:        c.nativeBackendReady,
-		NativeBackendBlocker:      c.nativeBackendBlocker,
-		FAEnabled:                 c.faEnabled,
-		FARequiredForVTurbo:       c.faRequiredForVTurbo,
-		VTurboSupported:           c.vTurboSupported,
-		DetectedHeadDim:           c.detectedHeadDim,
-		HeadDimSource:             c.headDimSource,
-		ArchitectureClass:         c.architectureClass,
-		SupportTier:               c.supportTier,
-		SupportReason:             c.supportReason,
-		UnsupportedReason:         c.unsupportedReason,
-		HybridKVArchitecture:      c.hybridKVArchitecture,
-		NativeTurboQuantAllowed:   c.nativeTurboQuantAllowed,
-		PresetRequested:           c.presetRequested,
-		PresetResolved:            c.presetResolved,
-		PresetWarning:             c.presetWarning,
-		PairingValidated:          c.pairingValidated,
-		ExperimentalLane:          c.experimentalLane,
-		TQBlockSize:               c.tqBlockSize,
-		TQLayoutKind:              c.tqLayoutKind,
-		TQLayoutVersion:           c.tqLayoutVersion,
-		TQGroupCount:              c.tqGroupCount,
-		TQOriginalHeadDim:         c.tqOriginalHeadDim,
-		TQTailPad:                 c.tqTailPad,
+		Requested:                       c.kvCacheRequested,
+		Effective:                       c.kvCacheEffective,
+		RequestedK:                      c.kvCacheRequestedK,
+		RequestedV:                      c.kvCacheRequestedV,
+		EffectiveK:                      c.kvCacheEffectiveK,
+		EffectiveV:                      c.kvCacheEffectiveV,
+		RequestedMode:                   c.requestedMode,
+		EffectiveMode:                   c.effectiveMode,
+		Algorithm:                       c.kvAlgoResolved,
+		AlgorithmK:                      c.kvAlgoResolvedK,
+		AlgorithmV:                      c.kvAlgoResolvedV,
+		Backend:                         c.kvCacheBackend,
+		Path:                            c.kvCachePath,
+		PathK:                           c.kvCachePathK,
+		PathV:                           c.kvCachePathV,
+		Symmetric:                       c.kvSymmetric,
+		Asymmetric:                      c.kvAsymmetric,
+		FallbackReason:                  c.fallbackReason,
+		FallbackApplied:                 c.fallbackApplied,
+		KOnlyFallback:                   c.kOnlyFallback,
+		TurboQuantPathKind:              c.turboQuantPathKind,
+		NativeTurboQuantActive:          c.nativeTurboQuantActive,
+		ReferenceTurboQuantActive:       c.referenceTurboQuantActive,
+		BackendPackedKOwned:             c.backendPackedKOwned,
+		BackendPackedVOwned:             c.backendPackedVOwned,
+		BackendPackedKAvailable:         c.backendPackedKAvailable,
+		BackendPackedVAvailable:         c.backendPackedVAvailable,
+		NativeBackendReady:              c.nativeBackendReady,
+		NativeBackendBlocker:            c.nativeBackendBlocker,
+		FAEnabled:                       c.faEnabled,
+		FARequiredForVTurbo:             c.faRequiredForVTurbo,
+		VTurboSupported:                 c.vTurboSupported,
+		DetectedHeadDim:                 c.detectedHeadDim,
+		HeadDimSource:                   c.headDimSource,
+		ArchitectureClass:               c.architectureClass,
+		SupportTier:                     c.supportTier,
+		SupportReason:                   c.supportReason,
+		UnsupportedReason:               c.unsupportedReason,
+		HybridKVArchitecture:            c.hybridKVArchitecture,
+		NativeTurboQuantAllowed:         c.nativeTurboQuantAllowed,
+		PresetRequested:                 c.presetRequested,
+		PresetResolved:                  c.presetResolved,
+		PresetWarning:                   c.presetWarning,
+		PairingValidated:                c.pairingValidated,
+		ExperimentalLane:                c.experimentalLane,
+		TQBlockSize:                     c.tqBlockSize,
+		TQLayoutKind:                    c.tqLayoutKind,
+		TQLayoutVersion:                 c.tqLayoutVersion,
+		TQGroupCount:                    c.tqGroupCount,
+		TQOriginalHeadDim:               c.tqOriginalHeadDim,
+		TQTailPad:                       c.tqTailPad,
+		VReconstructionComputeDType:     c.vReconstructionComputeDType,
+		SegmentedHeadActive:             c.segmentedHeadActive,
+		SegmentedHeadPlan:               c.segmentedHeadPlan,
+		AttentionSurfacePolicyRequested: c.attentionSurfacePolicyRequested,
+		AttentionSurfacePolicyEffective: c.attentionSurfacePolicyEffective,
+		AttentionSurfaceBehavior:        c.attentionSurfaceBehavior,
+		AttentionSurfaceOverrideApplied: c.attentionSurfaceOverrideApplied,
+		AttentionSurfaceOverrideReason:  c.attentionSurfaceOverrideReason,
+		AttentionSurfaceClasses:         c.attentionSurfaceClasses,
+		QJLKRequested:                   c.qjlKRequested,
+		QJLVRequested:                   c.qjlVRequested,
+		QJLKEnabled:                     c.qjlKEnabled,
+		QJLVEnabled:                     c.qjlVEnabled,
+		ResidualTailTokens:              c.residualTailTokens,
+		ExperimentalWeightQuantization:  c.experimentalWeightQuantization,
+		ExperimentalWeightQuantPolicy:   c.experimentalWeightQuantPolicy,
+		ExperimentalWeightQuantSource:   c.experimentalWeightQuantSource,
+		ExperimentalWeightQuantActive:   c.experimentalWeightQuantActive,
 	}
+}
+
+func normalizeAttentionSurfacePolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", "auto":
+		return "auto"
+	case "uniform":
+		return "uniform"
+	case "surface-aware":
+		return "surface-aware"
+	default:
+		return "auto"
+	}
+}
+
+func backendSupportFor(backend ml.Backend) ml.TurboQuantSupport {
+	if tqBackend, ok := backend.(ml.TurboQuantBackend); ok {
+		return tqBackend.TurboQuantSupport()
+	}
+	return ml.TurboQuantSupport{}
+}
+
+func effectiveVReconstructionComputeDType(pathKind string, backendPackedVOwned bool, support ml.TurboQuantSupport, referenceWrapperActive bool) string {
+	if referenceWrapperActive || !backendPackedVOwned || pathKind == "reference_wrapper" || pathKind == "dense-fallback" || pathKind == "native_grouped_scaffold" {
+		return "fp32"
+	}
+	return strings.ToLower(strings.TrimSpace(support.VReconstructionComputeDType))
+}
+
+func deriveAttentionSurfaceBehavior(classes string, overrideApplied bool, effectiveKType, effectiveVType string) string {
+	if overrideApplied {
+		return "global=f16,swa=f16,dispatch=whole-model-fallback"
+	}
+	lowerClasses := strings.ToLower(strings.TrimSpace(classes))
+	switch {
+	case strings.Contains(lowerClasses, "swa"):
+		return fmt.Sprintf("global=%s/%s,swa=f16/f16,dispatch=metadata-only", effectiveKType, effectiveVType)
+	case strings.Contains(lowerClasses, "hybrid_unknown"):
+		return "hybrid_unknown=f16/f16,dispatch=whole-model-fallback"
+	default:
+		return fmt.Sprintf("global=%s/%s", effectiveKType, effectiveVType)
+	}
+}
+
+func normalizeExperimentalWeightQuantization(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "off":
+		return "off"
+	case "attention_only":
+		return "attention_only"
+	default:
+		return "off"
+	}
+}
+
+func normalizeExperimentalWeightQuantPolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", "attention_only_safe":
+		return "attention_only_safe"
+	default:
+		return "attention_only_safe"
+	}
+}
+
+func normalizeExperimentalWeightQuantSource(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "", "f16":
+		return "f16"
+	case "bf16":
+		return "bf16"
+	default:
+		return "f16"
+	}
+}
+
+func appendFallbackReason(existing, reason string) string {
+	if reason == "" {
+		return existing
+	}
+	if existing == "" {
+		return reason
+	}
+	if strings.Contains(existing, reason) {
+		return existing
+	}
+	return existing + "; " + reason
+}
+
+func joinIntSlice(values []int, sep string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, fmt.Sprintf("%d", value))
+	}
+	return strings.Join(parts, sep)
 }
 
 func kvcachePreset(dtype ml.DType) (turboquant.Preset, bool) {

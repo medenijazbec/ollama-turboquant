@@ -241,6 +241,14 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 
 	modes := resolveKVCacheModes(opts)
 	backendMode := resolveKVCacheBackendMode(opts)
+	loadRequest.TurboQuantQJLK = resolveRunnerBoolOption(opts.Runner.TurboQuantQJLK, envconfig.TurboQuantQJLK, false)
+	loadRequest.TurboQuantQJLV = resolveRunnerBoolOption(opts.Runner.TurboQuantQJLV, envconfig.TurboQuantQJLV, false)
+	loadRequest.TurboQuantResidualTailTokens = resolveRunnerUintOption(opts.Runner.TurboQuantResidualTailTokens, envconfig.TurboQuantResidualTailTokens)
+	loadRequest.TurboQuantAllowSegmentedHeads = resolveRunnerPlainBoolOption(opts.Runner.TurboQuantAllowSegmentedHeads, envconfig.TurboQuantAllowSegmentedHeads)
+	loadRequest.TurboQuantSurfacePolicy = resolveRunnerStringOption(opts.Runner.TurboQuantSurfacePolicy, envconfig.TurboQuantSurfacePolicy, "auto")
+	loadRequest.ExperimentalWeightQuantization = resolveRunnerStringOption(opts.Runner.ExperimentalWeightQuantization, envconfig.ExperimentalWeightQuantization, "off")
+	loadRequest.ExperimentalWeightQuantPolicy = resolveRunnerStringOption(opts.Runner.ExperimentalWeightQuantPolicy, envconfig.ExperimentalWeightQuantPolicy, "attention_only_safe")
+	loadRequest.ExperimentalWeightQuantSource = resolveRunnerStringOption(opts.Runner.ExperimentalWeightQuantSource, envconfig.ExperimentalWeightQuantSource, "f16")
 	logKVCacheModeOverrides(modes)
 	if !fa && isQuantizedKVCacheType(modes.V.Effective) {
 		slog.Warn("requested V-side turboquant may fall back at runtime because flash attention is disabled", "requested_k_type", modes.K.Effective, "requested_v_type", modes.V.Effective, "backend", backendMode.Effective)
@@ -456,6 +464,37 @@ func resolveKVCacheBackendMode(opts api.Options) kvCacheBackendMode {
 		Requested: strings.ToLower(strings.TrimSpace(value)),
 		Effective: normalizeKVCacheBackend(value),
 	}
+}
+
+func resolveRunnerBoolOption(value *bool, env func(bool) bool, defaultValue bool) bool {
+	if value != nil {
+		return *value
+	}
+	return env(defaultValue)
+}
+
+func resolveRunnerPlainBoolOption(value *bool, env func() bool) bool {
+	if value != nil {
+		return *value
+	}
+	return env()
+}
+
+func resolveRunnerStringOption(value string, env func() string, defaultValue string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	if envValue := strings.TrimSpace(env()); envValue != "" {
+		return envValue
+	}
+	return defaultValue
+}
+
+func resolveRunnerUintOption(value int, env func() uint) int {
+	if value > 0 {
+		return value
+	}
+	return int(env())
 }
 
 func newKVCacheMode(cacheType string) kvCacheMode {
@@ -685,18 +724,26 @@ func (o LoadOperation) String() string {
 type LoadRequest struct {
 	Operation LoadOperation
 
-	LoraPath       []string
-	Parallel       int
-	BatchSize      int
-	FlashAttention ml.FlashAttentionType
-	KvSize         int
-	KvCacheType    string
-	KvCacheTypeK   string
-	KvCacheTypeV   string
-	KvCacheBackend string
-	NumThreads     int
-	GPULayers      ml.GPULayersList
-	MultiUserCache bool
+	LoraPath                       []string
+	Parallel                       int
+	BatchSize                      int
+	FlashAttention                 ml.FlashAttentionType
+	KvSize                         int
+	KvCacheType                    string
+	KvCacheTypeK                   string
+	KvCacheTypeV                   string
+	KvCacheBackend                 string
+	TurboQuantQJLK                 bool
+	TurboQuantQJLV                 bool
+	TurboQuantResidualTailTokens   int
+	TurboQuantAllowSegmentedHeads  bool
+	TurboQuantSurfacePolicy        string
+	ExperimentalWeightQuantization string
+	ExperimentalWeightQuantPolicy  string
+	ExperimentalWeightQuantSource  string
+	NumThreads                     int
+	GPULayers                      ml.GPULayersList
+	MultiUserCache                 bool
 
 	// Legacy fields - not used with the Ollama engine
 	ProjectorPath string
@@ -1729,68 +1776,87 @@ type Logprob struct {
 }
 
 type CompletionResponse struct {
-	Content                   string        `json:"content"`
-	DoneReason                DoneReason    `json:"done_reason"`
-	Done                      bool          `json:"done"`
-	PromptEvalCount           int           `json:"prompt_eval_count"`
-	PromptEvalDuration        time.Duration `json:"prompt_eval_duration"`
-	EvalCount                 int           `json:"eval_count"`
-	EvalDuration              time.Duration `json:"eval_duration"`
-	KVCacheRequested          string        `json:"kv_cache_requested,omitempty"`
-	KVCacheEffective          string        `json:"kv_cache_effective,omitempty"`
-	KVCacheRequestedK         string        `json:"kv_cache_requested_k,omitempty"`
-	KVCacheRequestedV         string        `json:"kv_cache_requested_v,omitempty"`
-	RequestedMode             string        `json:"requested_mode,omitempty"`
-	ResolvedKVCacheType       string        `json:"resolved_kv_cache_type,omitempty"`
-	ResolvedKVCacheTypeK      string        `json:"resolved_kv_cache_type_k,omitempty"`
-	ResolvedKVCacheTypeV      string        `json:"resolved_kv_cache_type_v,omitempty"`
-	EffectiveMode             string        `json:"effective_mode,omitempty"`
-	KVAlgoResolved            string        `json:"kv_algo_resolved,omitempty"`
-	KVAlgoResolvedK           string        `json:"kv_algo_resolved_k,omitempty"`
-	KVAlgoResolvedV           string        `json:"kv_algo_resolved_v,omitempty"`
-	KVCacheBackend            string        `json:"kv_cache_backend,omitempty"`
-	KVCachePath               string        `json:"kv_cache_path,omitempty"`
-	KVCachePathK              string        `json:"kv_cache_path_k,omitempty"`
-	KVCachePathV              string        `json:"kv_cache_path_v,omitempty"`
-	KVSymmetric               bool          `json:"kv_symmetric,omitempty"`
-	KVAsymmetric              bool          `json:"kv_asymmetric,omitempty"`
-	FallbackReason            string        `json:"fallback_reason,omitempty"`
-	FallbackApplied           bool          `json:"fallback_applied,omitempty"`
-	KOnlyFallback             bool          `json:"k_only_fallback,omitempty"`
-	TurboQuantPathKind        string        `json:"turboquant_path_kind,omitempty"`
-	NativeTurboQuantActive    bool          `json:"native_turboquant_active,omitempty"`
-	ReferenceTurboQuantActive bool          `json:"reference_turboquant_active,omitempty"`
-	BackendPackedKOwned       bool          `json:"backend_packed_k_owned,omitempty"`
-	BackendPackedVOwned       bool          `json:"backend_packed_v_owned,omitempty"`
-	BackendPackedKAvailable   bool          `json:"backend_packed_k_available,omitempty"`
-	BackendPackedVAvailable   bool          `json:"backend_packed_v_available,omitempty"`
-	NativeBackendReady        bool          `json:"native_backend_ready,omitempty"`
-	NativeBackendBlocker      string        `json:"native_backend_blocker,omitempty"`
-	FAEnabled                 bool          `json:"fa_enabled,omitempty"`
-	FARequiredForVTurbo       bool          `json:"fa_required_for_v_turbo,omitempty"`
-	VTurboSupported           bool          `json:"v_turbo_supported,omitempty"`
-	DetectedHeadDim           int           `json:"detected_head_dim,omitempty"`
-	HeadDimSource             string        `json:"head_dim_source,omitempty"`
-	ArchitectureClass         string        `json:"architecture_class,omitempty"`
-	SupportTier               string        `json:"support_tier,omitempty"`
-	SupportReason             string        `json:"support_reason,omitempty"`
-	UnsupportedReason         string        `json:"unsupported_reason,omitempty"`
-	HybridKVArchitecture      bool          `json:"hybrid_kv_architecture,omitempty"`
-	NativeTurboQuantAllowed   bool          `json:"native_turboquant_allowed,omitempty"`
-	PresetRequested           string        `json:"preset_requested,omitempty"`
-	PresetResolved            string        `json:"preset_resolved,omitempty"`
-	PresetWarning             string        `json:"preset_warning,omitempty"`
-	PairingValidated          bool          `json:"pairing_validated,omitempty"`
-	ExperimentalLane          bool          `json:"experimental_lane,omitempty"`
-	TQBlockSize               int           `json:"tq_block_size,omitempty"`
-	TQLayoutKind              string        `json:"tq_layout_kind,omitempty"`
-	TQLayoutVersion           int           `json:"tq_layout_version,omitempty"`
-	TQGroupCount              int           `json:"tq_group_count,omitempty"`
-	TQOriginalHeadDim         int           `json:"tq_original_head_dim,omitempty"`
-	TQTailPad                 int           `json:"tq_tail_pad,omitempty"`
-	KVCacheBytes              uint64        `json:"kv_cache_bytes,omitempty"`
-	WeightsBytes              uint64        `json:"weights_bytes,omitempty"`
-	TotalVRAMBytes            uint64        `json:"total_vram_bytes,omitempty"`
+	Content                         string        `json:"content"`
+	DoneReason                      DoneReason    `json:"done_reason"`
+	Done                            bool          `json:"done"`
+	PromptEvalCount                 int           `json:"prompt_eval_count"`
+	PromptEvalDuration              time.Duration `json:"prompt_eval_duration"`
+	EvalCount                       int           `json:"eval_count"`
+	EvalDuration                    time.Duration `json:"eval_duration"`
+	KVCacheRequested                string        `json:"kv_cache_requested,omitempty"`
+	KVCacheEffective                string        `json:"kv_cache_effective,omitempty"`
+	KVCacheRequestedK               string        `json:"kv_cache_requested_k,omitempty"`
+	KVCacheRequestedV               string        `json:"kv_cache_requested_v,omitempty"`
+	RequestedMode                   string        `json:"requested_mode,omitempty"`
+	ResolvedKVCacheType             string        `json:"resolved_kv_cache_type,omitempty"`
+	ResolvedKVCacheTypeK            string        `json:"resolved_kv_cache_type_k,omitempty"`
+	ResolvedKVCacheTypeV            string        `json:"resolved_kv_cache_type_v,omitempty"`
+	EffectiveMode                   string        `json:"effective_mode,omitempty"`
+	KVAlgoResolved                  string        `json:"kv_algo_resolved,omitempty"`
+	KVAlgoResolvedK                 string        `json:"kv_algo_resolved_k,omitempty"`
+	KVAlgoResolvedV                 string        `json:"kv_algo_resolved_v,omitempty"`
+	KVCacheBackend                  string        `json:"kv_cache_backend,omitempty"`
+	KVCachePath                     string        `json:"kv_cache_path,omitempty"`
+	KVCachePathK                    string        `json:"kv_cache_path_k,omitempty"`
+	KVCachePathV                    string        `json:"kv_cache_path_v,omitempty"`
+	KVSymmetric                     bool          `json:"kv_symmetric,omitempty"`
+	KVAsymmetric                    bool          `json:"kv_asymmetric,omitempty"`
+	FallbackReason                  string        `json:"fallback_reason,omitempty"`
+	FallbackApplied                 bool          `json:"fallback_applied,omitempty"`
+	KOnlyFallback                   bool          `json:"k_only_fallback,omitempty"`
+	TurboQuantPathKind              string        `json:"turboquant_path_kind,omitempty"`
+	NativeTurboQuantActive          bool          `json:"native_turboquant_active,omitempty"`
+	ReferenceTurboQuantActive       bool          `json:"reference_turboquant_active,omitempty"`
+	BackendPackedKOwned             bool          `json:"backend_packed_k_owned,omitempty"`
+	BackendPackedVOwned             bool          `json:"backend_packed_v_owned,omitempty"`
+	BackendPackedKAvailable         bool          `json:"backend_packed_k_available,omitempty"`
+	BackendPackedVAvailable         bool          `json:"backend_packed_v_available,omitempty"`
+	NativeBackendReady              bool          `json:"native_backend_ready,omitempty"`
+	NativeBackendBlocker            string        `json:"native_backend_blocker,omitempty"`
+	FAEnabled                       bool          `json:"fa_enabled,omitempty"`
+	FARequiredForVTurbo             bool          `json:"fa_required_for_v_turbo,omitempty"`
+	VTurboSupported                 bool          `json:"v_turbo_supported,omitempty"`
+	DetectedHeadDim                 int           `json:"detected_head_dim,omitempty"`
+	HeadDimSource                   string        `json:"head_dim_source,omitempty"`
+	ArchitectureClass               string        `json:"architecture_class,omitempty"`
+	SupportTier                     string        `json:"support_tier,omitempty"`
+	SupportReason                   string        `json:"support_reason,omitempty"`
+	UnsupportedReason               string        `json:"unsupported_reason,omitempty"`
+	HybridKVArchitecture            bool          `json:"hybrid_kv_architecture,omitempty"`
+	NativeTurboQuantAllowed         bool          `json:"native_turboquant_allowed,omitempty"`
+	PresetRequested                 string        `json:"preset_requested,omitempty"`
+	PresetResolved                  string        `json:"preset_resolved,omitempty"`
+	PresetWarning                   string        `json:"preset_warning,omitempty"`
+	PairingValidated                bool          `json:"pairing_validated,omitempty"`
+	ExperimentalLane                bool          `json:"experimental_lane,omitempty"`
+	TQBlockSize                     int           `json:"tq_block_size,omitempty"`
+	TQLayoutKind                    string        `json:"tq_layout_kind,omitempty"`
+	TQLayoutVersion                 int           `json:"tq_layout_version,omitempty"`
+	TQGroupCount                    int           `json:"tq_group_count,omitempty"`
+	TQOriginalHeadDim               int           `json:"tq_original_head_dim,omitempty"`
+	TQTailPad                       int           `json:"tq_tail_pad,omitempty"`
+	VReconstructionComputeDType     string        `json:"v_reconstruction_compute_dtype,omitempty"`
+	SegmentedHeadActive             bool          `json:"segmented_head_active,omitempty"`
+	SegmentedHeadPlan               string        `json:"segmented_head_plan,omitempty"`
+	AttentionSurfacePolicy          string        `json:"attention_surface_policy,omitempty"`
+	AttentionSurfacePolicyRequested string        `json:"attention_surface_policy_requested,omitempty"`
+	AttentionSurfacePolicyEffective string        `json:"attention_surface_policy_effective,omitempty"`
+	AttentionSurfaceBehavior        string        `json:"attention_surface_behavior,omitempty"`
+	AttentionSurfaceOverrideApplied bool          `json:"attention_surface_override_applied,omitempty"`
+	AttentionSurfaceOverrideReason  string        `json:"attention_surface_override_reason,omitempty"`
+	AttentionSurfaceClasses         string        `json:"attention_surface_classes,omitempty"`
+	QJLKRequested                   bool          `json:"qjl_k_requested,omitempty"`
+	QJLVRequested                   bool          `json:"qjl_v_requested,omitempty"`
+	QJLKEnabled                     bool          `json:"qjl_k_enabled,omitempty"`
+	QJLVEnabled                     bool          `json:"qjl_v_enabled,omitempty"`
+	ResidualTailTokens              int           `json:"residual_tail_tokens,omitempty"`
+	ExperimentalWeightQuantization  string        `json:"experimental_weight_quantization,omitempty"`
+	ExperimentalWeightQuantPolicy   string        `json:"experimental_weight_quant_policy,omitempty"`
+	ExperimentalWeightQuantSource   string        `json:"experimental_weight_quant_source,omitempty"`
+	ExperimentalWeightQuantActive   bool          `json:"experimental_weight_quant_active,omitempty"`
+	KVCacheBytes                    uint64        `json:"kv_cache_bytes,omitempty"`
+	WeightsBytes                    uint64        `json:"weights_bytes,omitempty"`
+	TotalVRAMBytes                  uint64        `json:"total_vram_bytes,omitempty"`
 
 	// Logprobs contains log probability information if requested
 	Logprobs []Logprob `json:"logprobs,omitempty"`
